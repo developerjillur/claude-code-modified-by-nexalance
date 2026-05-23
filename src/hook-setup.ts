@@ -32,6 +32,32 @@ export interface WorkspacePaths {
 }
 
 /**
+ * Canonicalize a workspace path so the same project always hashes to the
+ * same dir regardless of trailing slash, relative components, or symlinks.
+ *
+ *   /Users/x/foo/        →   /Users/x/foo
+ *   /Users/x/./foo       →   /Users/x/foo
+ *   /tmp/foo (symlink)   →   /Users/x/foo  (resolved via realpath)
+ *
+ * Without this, the extension (which sees vscode.workspace.workspaceFolders[0].uri.fsPath)
+ * and the hook (which sees the Stop event's `cwd`) can disagree on the
+ * canonical form and write to two different workspace dirs.
+ */
+export function canonicalizeWorkspacePath(workspacePath: string): string {
+	if (!workspacePath || workspacePath === '__no-workspace__') {
+		return '__no-workspace__';
+	}
+	const resolved = path.resolve(workspacePath);
+	try {
+		return fs.realpathSync(resolved);
+	} catch (_) {
+		// Path doesn't exist on disk (or no permission to resolve) — fall back
+		// to the resolved-but-not-realpathed form. Still better than the raw input.
+		return resolved;
+	}
+}
+
+/**
  * Per-workspace dir naming: `<safe-basename>-<sha1[0..8]>`.
  *
  *   /Users/x/Desktop/NexaLance/Kvanti-3   →   Kvanti-3-a3f5b2c1
@@ -41,9 +67,10 @@ export interface WorkspacePaths {
  * tell which folder belongs to which project just by reading the dir name).
  */
 function workspaceSafeName(workspacePath: string): string {
-	const baseRaw = path.basename(workspacePath || 'default') || 'workspace';
+	const canon = canonicalizeWorkspacePath(workspacePath);
+	const baseRaw = path.basename(canon) || 'workspace';
 	const safe = baseRaw.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'workspace';
-	const hash = crypto.createHash('sha1').update(workspacePath || 'default').digest('hex').slice(0, 8);
+	const hash = crypto.createHash('sha1').update(canon).digest('hex').slice(0, 8);
 	return safe + '-' + hash;
 }
 
@@ -84,11 +111,27 @@ const MIME_TO_EXT: Record<string, string> = {
 	'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/bmp': 'bmp'
 };
 
+// 10 MB after base64 decoding. A standard 4K screenshot is ~5 MB at PNG,
+// so this is roomy enough for typical clipboard pastes but rejects the
+// 50 MB+ "I screenshotted my whole 6K monitor twice" cases that would
+// silently fill ~/.claude/claude-mod-attachments/.
+const MAX_PASTED_IMAGE_BYTES = 10 * 1024 * 1024;
+
+export class ImageTooLargeError extends Error {
+	constructor(public readonly actualBytes: number, public readonly maxBytes: number) {
+		super('Pasted image is ' + actualBytes + ' bytes which exceeds the ' + maxBytes + '-byte limit.');
+		this.name = 'ImageTooLargeError';
+	}
+}
+
 export function saveBase64Image(base64Data: string, mimeType: string): string {
 	const ext = MIME_TO_EXT[mimeType.toLowerCase()] || 'png';
+	const buf = Buffer.from(base64Data, 'base64');
+	if (buf.length > MAX_PASTED_IMAGE_BYTES) {
+		throw new ImageTooLargeError(buf.length, MAX_PASTED_IMAGE_BYTES);
+	}
 	const filename = 'paste-' + Date.now() + '-' + Math.floor(Math.random() * 100000) + '.' + ext;
 	const target = path.join(getAttachmentsDir(), filename);
-	const buf = Buffer.from(base64Data, 'base64');
 	atomicWriteBuffer(target, buf);
 	return target;
 }
@@ -176,13 +219,39 @@ export function uninstallHook(): { uninstalled: boolean } {
 	return { uninstalled: removed };
 }
 
+/**
+ * Loads the queue and drops any malformed entries instead of returning a
+ * crashy mix. A queue item is valid only if it has a non-empty string `id`
+ * and a string `text`. `createdAt` is repaired to Date.now() if missing or
+ * non-numeric.
+ *
+ * Why: hand-edits or partial file corruption can leave entries with
+ * undefined fields, and the webview crashes when it tries to render a row
+ * for an item without an id (the `onclick="steerItem('undefined')"` call
+ * looks valid but produces a no-op + console error).
+ */
 export function loadQueueFromFile(queueFile: string): QueueItem[] {
 	if (!fs.existsSync(queueFile)) { return []; }
+	let parsed: any;
 	try {
-		const parsed = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
-		if (Array.isArray(parsed)) { return parsed; }
-	} catch (_) { /* fall through */ }
-	return [];
+		parsed = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+	} catch (_) {
+		return [];
+	}
+	if (!Array.isArray(parsed)) { return []; }
+	const validated: QueueItem[] = [];
+	for (const raw of parsed) {
+		if (!raw || typeof raw !== 'object') { continue; }
+		const id = typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : null;
+		const text = typeof raw.text === 'string' ? raw.text : null;
+		if (!id || text === null) { continue; }
+		const createdAt = typeof raw.createdAt === 'number' && isFinite(raw.createdAt) ? raw.createdAt : Date.now();
+		const attachments = Array.isArray(raw.attachments) ? raw.attachments.filter((a: any) => typeof a === 'string') : undefined;
+		const item: QueueItem = { id, text, createdAt };
+		if (attachments && attachments.length) { item.attachments = attachments; }
+		validated.push(item);
+	}
+	return validated;
 }
 
 export function saveQueueToFile(queueFile: string, queue: QueueItem[]): void {

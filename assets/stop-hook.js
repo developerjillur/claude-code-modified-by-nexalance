@@ -35,10 +35,28 @@ const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const WORKSPACES_ROOT = path.join(CLAUDE_DIR, 'claude-mod-queues');
 const MAX_HISTORY = 50;
 
+// IMPORTANT: this canonicalization must stay in sync with the same function
+// in src/hook-setup.ts. The extension and the hook BOTH compute the per-
+// workspace dir name from the same input; if their canonicalizations differ
+// (trailing slash, symlink resolution, relative components), they end up
+// reading and writing different files and never see each other's queue.
+function canonicalizeWorkspacePath(workspacePath) {
+	if (!workspacePath || workspacePath === '__no-workspace__') {
+		return '__no-workspace__';
+	}
+	const resolved = path.resolve(workspacePath);
+	try {
+		return fs.realpathSync(resolved);
+	} catch (_) {
+		return resolved;
+	}
+}
+
 function workspaceSafeName(workspacePath) {
-	const baseRaw = path.basename(workspacePath || 'default') || 'workspace';
+	const canon = canonicalizeWorkspacePath(workspacePath);
+	const baseRaw = path.basename(canon) || 'workspace';
 	const safe = baseRaw.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'workspace';
-	const hash = crypto.createHash('sha1').update(workspacePath || 'default').digest('hex').slice(0, 8);
+	const hash = crypto.createHash('sha1').update(canon).digest('hex').slice(0, 8);
 	return safe + '-' + hash;
 }
 

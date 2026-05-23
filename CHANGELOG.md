@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.2.11] - 2026-05-23 — Hardening pass (gaps audit + improvements)
+
+### Fixed — Workspace dir mismatch when paths weren't canonicalized
+
+The extension fed `vscode.workspace.workspaceFolders[0].uri.fsPath` into the workspace hasher, the hook fed `event.cwd`. These usually match, but a **trailing slash, redundant `./`, or symlinked workspace path** produced different SHA-1 prefixes → the extension and hook silently wrote to different per-workspace dirs and never saw each other's queue.
+
+`canonicalizeWorkspacePath()` now wraps both inputs in `fs.realpathSync(path.resolve(p))` (with a graceful fallback when realpath fails). Same function in both `src/hook-setup.ts` and `assets/stop-hook.js`. A self-test proves `foo`, `foo/`, `foo/./`, and a symlink to `foo` all hash to the identical workspace dir.
+
+### Fixed — Malformed queue entries no longer crash the UI
+
+`loadQueueFromFile` used to return the raw parsed array as-is. A partial corruption or hand-edit could leave entries missing `id`/`text`, and the webview's `onclick="steerItem('undefined')"` then failed silently. The loader now drops invalid entries, repairs missing `createdAt` to `Date.now()`, and filters attachment arrays down to string entries only.
+
+Self-test feeds a 9-element mixed-validity JSON and asserts 4 valid entries survive with attachments correctly filtered.
+
+### Added — 10 MB cap on pasted-image attachments
+
+`saveBase64Image` now throws `ImageTooLargeError` (with `actualBytes`/`maxBytes`) when the decoded payload exceeds 10 MB. The extension surfaces a friendly note: *"Image too large (X MB). Limit is 10 MB per paste. Resize or screenshot a smaller region."* This prevents `~/.claude/claude-mod-attachments/` from silently filling up when someone pastes a 6K monitor screenshot.
+
+### Added — In-flight spinner on Fire-now + a VS Code notification when permission is missing
+
+- The Fire-now button shows a spinner labelled "Firing…" while osascript runs, so multi-second kicks are visually accounted for.
+- When a kick fails because of macOS permission (ETIMEDOUT / -1743 / "not authorized"), the extension now pops a VS Code warning with two action buttons:
+  - **Open System Settings** — deep-links to Privacy → Automation
+  - **Run Probe** — re-attempts the osascript probe
+- The Native-submit status pill + inline help card update from the same event.
+
+### Tests — 12 groups, 90+ assertions, all green
+
+```
+=== Webview script boots cleanly                          ✓
+=== Per-workspace queue isolation                          ✓
+=== Stop-event loop protection                             ✓
+=== Native-vs-feedback paths                               ✓
+=== Setup module — install/uninstall + stable hook script  ✓
+=== getPathsForWorkspace returns workspace-scoped paths    ✓
+=== Atomic write integrity                                 ✓
+=== v0.2.11 path canonicalization                          ✓  ← new
+=== v0.2.11 queue integrity validation                     ✓  ← new
+=== v0.2.11 image size cap                                 ✓  ← new
+=== Auto-kick safeguard surface                            ✓
+=== Attachment helpers                                     ✓
+```
+
 ## [0.2.10] - 2026-05-23 — Auto-kick is back (with v0.2.4's "kick storm" bug fixed)
 
 ### Diagnosed — pending items sat forever when Claude was already idle

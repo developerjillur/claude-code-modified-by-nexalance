@@ -236,6 +236,21 @@ export function getWebviewHtml(): string {
 		color: rgba(255,255,255,0.4);
 		cursor: not-allowed;
 	}
+	.queue-fire.in-flight {
+		background: rgba(16,185,129,0.30);
+		color: rgba(255,255,255,0.85);
+		cursor: progress;
+	}
+	.queue-fire .spinner {
+		display: inline-block;
+		width: 10px;
+		height: 10px;
+		border: 1.5px solid rgba(255,255,255,0.4);
+		border-top-color: #fff;
+		border-radius: 50%;
+		animation: spinClaudeMod 0.8s linear infinite;
+	}
+	@keyframes spinClaudeMod { to { transform: rotate(360deg); } }
 	.queue-list {
 		display: flex; flex-direction: column;
 		overflow-y: auto; max-height: 260px;
@@ -485,7 +500,7 @@ export function getWebviewHtml(): string {
 	<div class="app-header">
 		<span class="app-title">Claude Mod <small>by NexaLance</small></span>
 		<span class="id-pill" title="This is the Claude Mod queue manager. The actual Claude Code chat happens in Anthropic's official extension. This panel only manages the pending queue and feeds prompts via the Stop hook.">
-			<span class="dot"></span>v0.2.10 · Auto-kick (safe)
+			<span class="dot"></span>v0.2.11 · Hardened
 		</span>
 	</div>
 
@@ -1080,6 +1095,19 @@ export function getWebviewHtml(): string {
 			case 'fileAttached':
 				if (msg.data && msg.data.path) { attachPath(msg.data.path); }
 				break;
+			case 'kickInFlight': {
+				const fireBtn = document.getElementById('queueFireBtn');
+				if (fireBtn) {
+					if (msg.data && msg.data.active) {
+						fireBtn.classList.add('in-flight');
+						fireBtn.innerHTML = '<span class="spinner"></span><span>Firing…</span>';
+					} else {
+						fireBtn.classList.remove('in-flight');
+						fireBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg><span>Fire now</span>';
+					}
+				}
+				break;
+			}
 		}
 	});
 

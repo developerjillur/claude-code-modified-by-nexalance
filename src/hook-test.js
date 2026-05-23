@@ -253,6 +253,96 @@ try {
 		if (failed > 0) { break; }
 	}
 
+	console.log('\n=== v0.2.11 path canonicalization (same project ↔ same dir) ===');
+	(function () {
+		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
+		const ws = path.join(os.tmpdir(), 'claude-mod-canon-test-' + Date.now());
+		fs.mkdirSync(ws, { recursive: true });
+		try {
+			const noSlash = setup.canonicalizeWorkspacePath(ws);
+			const withSlash = setup.canonicalizeWorkspacePath(ws + '/');
+			const relativeish = setup.canonicalizeWorkspacePath(ws + '/./');
+			assert(noSlash === withSlash, 'trailing slash → same canonical path');
+			assert(noSlash === relativeish, 'redundant ./ → same canonical path');
+
+			// Same workspace → same per-workspace paths
+			const a = setup.getPathsForWorkspace(ws);
+			const b = setup.getPathsForWorkspace(ws + '/');
+			assert(a.queueFile === b.queueFile, 'trailing slash → same queueFile');
+			assert(a.historyFile === b.historyFile, 'trailing slash → same historyFile');
+
+			// Symlinks resolve to the same canonical
+			const link = path.join(os.tmpdir(), 'claude-mod-canon-link-' + Date.now());
+			try { fs.symlinkSync(ws, link); } catch (_) { /* skip on platforms without symlink support */ }
+			if (fs.existsSync(link)) {
+				const viaSymlink = setup.canonicalizeWorkspacePath(link);
+				assert(viaSymlink === noSlash, 'symlink → resolves to same canonical as target');
+				try { fs.unlinkSync(link); } catch (_) {}
+			}
+
+			// The hook script's canonicalization must match the TS module's.
+			// We run a tiny shim that requires only path/fs/crypto and the
+			// hook's helpers — but since the hook is a script not a module,
+			// instead extract its canonicalizeWorkspacePath via regex and eval
+			// in a sandbox, OR rely on the well-known string content.
+			const hookSrc = fs.readFileSync(path.join(EXT_ROOT, 'assets/stop-hook.js'), 'utf8');
+			assert(hookSrc.indexOf('canonicalizeWorkspacePath') >= 0, 'hook source has the canonicalization function');
+			assert(hookSrc.indexOf('fs.realpathSync') >= 0, 'hook source uses realpathSync for canonical resolution');
+		} finally {
+			try { fs.rmdirSync(ws); } catch (_) {}
+		}
+	})();
+
+	console.log('\n=== v0.2.11 queue integrity validation (drops malformed entries) ===');
+	(function () {
+		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
+		const ws = path.join(os.tmpdir(), 'claude-mod-validation-test-' + Date.now());
+		fs.mkdirSync(ws, { recursive: true });
+		const paths = setup.getPathsForWorkspace(ws);
+		// Write a mixed-validity file
+		fs.writeFileSync(paths.queueFile, JSON.stringify([
+			{ id: 'a', text: 'good 1', createdAt: 1 },
+			null,
+			{ text: 'no id' },
+			{ id: 'b' },
+			{ id: 'c', text: 'good 2' },
+			{ id: 'd', text: 'with createdAt repaired' /* no createdAt */ },
+			{ id: 'e', text: 'with attachments', attachments: ['/tmp/foo', 42, null, '/tmp/bar'] },
+			'not an object',
+			{ id: '', text: 'empty id' }
+		]));
+		const q = setup.loadQueueFromFile(paths.queueFile);
+		assert(q.length === 4, 'kept only 4 valid entries (was 9 raw; dropped 5 malformed) — got ' + q.length);
+		assert(q[0].text === 'good 1', 'first valid item preserved');
+		assert(q[1].text === 'good 2', 'second valid item preserved');
+		assert(typeof q[2].createdAt === 'number', 'missing createdAt repaired to a number');
+		assert(q[3].attachments && q[3].attachments.length === 2, 'attachments filtered to string entries only');
+		// Cleanup
+		try { fs.unlinkSync(paths.queueFile); fs.rmdirSync(paths.workspaceDir); } catch (_) {}
+	})();
+
+	console.log('\n=== v0.2.11 image size cap (10 MB rejected) ===');
+	(function () {
+		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
+		// Small image: should succeed
+		const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+		const ok = setup.saveBase64Image(pngBase64, 'image/png');
+		assert(fs.existsSync(ok), 'small image still accepted');
+		try { fs.unlinkSync(ok); } catch (_) {}
+
+		// 11 MB image: should throw ImageTooLargeError
+		const big = Buffer.alloc(11 * 1024 * 1024, 0).toString('base64');
+		let threw = false;
+		try { setup.saveBase64Image(big, 'image/png'); }
+		catch (e) {
+			threw = true;
+			assert(e.name === 'ImageTooLargeError', 'oversized → ImageTooLargeError (got ' + e.name + ')');
+			assert(typeof e.actualBytes === 'number' && e.actualBytes > 10 * 1024 * 1024, 'error carries actualBytes');
+			assert(typeof e.maxBytes === 'number' && e.maxBytes === 10 * 1024 * 1024, 'error carries maxBytes = 10 MB');
+		}
+		assert(threw, 'oversized image was rejected');
+	})();
+
 	console.log('\n=== Auto-kick safeguard surface (v0.2.10) ===');
 	(function () {
 		// We can't easily exercise the QueueProvider class here (it requires

@@ -250,7 +250,13 @@ class QueueProvider implements vscode.WebviewViewProvider {
 					const saved = saveBase64Image(msg.data || '', msg.mimeType || 'image/png');
 					this._post({ type: 'fileAttached', data: { path: saved } });
 				} catch (err: any) {
-					this._post({ type: 'note', data: 'Could not save pasted image: ' + err.message });
+					if (err && err.name === 'ImageTooLargeError') {
+						const mb = (err.actualBytes / 1024 / 1024).toFixed(1);
+						const limitMb = (err.maxBytes / 1024 / 1024).toFixed(0);
+						this._post({ type: 'note', data: `Image too large (${mb} MB). Limit is ${limitMb} MB per paste. Resize or screenshot a smaller region.` });
+					} else {
+						this._post({ type: 'note', data: 'Could not save pasted image: ' + err.message });
+					}
 				}
 				return;
 			case 'probeAccessibility':
@@ -366,6 +372,9 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	private async _maybeKickHead(reason: 'auto' | 'manual'): Promise<void> {
 		if (this._kickInFlight) { return; }
 		this._kickInFlight = true;
+		// Tell the webview the kick started so it can show a spinner on the
+		// Fire-now button; cleared on completion below.
+		this._post({ type: 'kickInFlight', data: { active: true } });
 		try {
 			const queue = loadQueueFromFile(this._paths.queueFile);
 			if (queue.length === 0) {
@@ -384,17 +393,45 @@ class QueueProvider implements vscode.WebviewViewProvider {
 				try { this._appendHistory(head.text || ''); } catch (_) { /* noop */ }
 				this.pushHistoryFromDisk();
 			} else {
+				// Put the item back so it isn't lost.
 				const restored = [head, ...rest];
 				saveQueueToFile(this._paths.queueFile, restored);
 				this._post({ type: 'restoreQueue', data: restored });
-				this._post({
-					type: 'note',
-					data: 'Kick failed: ' + (result.error || 'unknown') +
-						'\nFirst run requires macOS Accessibility permission for VS Code (System Settings → Privacy & Security → Accessibility / Automation).'
-				});
+
+				// Categorise the failure so the user knows what to do next.
+				const err = (result.error || 'unknown').toString();
+				const isTimeout = err.indexOf('ETIMEDOUT') >= 0 || err.indexOf('timed out') >= 0;
+				const isPermissionLike = isTimeout || err.indexOf('-1743') >= 0 || err.indexOf('not authorized') >= 0;
+				if (isPermissionLike) {
+					this._post({ type: 'note', data: '✗ Kick failed: macOS hasn\'t granted Accessibility / Automation permission to VS Code. Click Open prefs and enable VS Code → System Events.' });
+					// Also surface a VS Code notification with an action button
+					// so the user can't miss it.
+					vscode.window.showWarningMessage(
+						'Claude Mod: macOS Accessibility / Automation permission missing — pending prompts can\'t be typed into Claude\'s chat.',
+						'Open System Settings',
+						'Run Probe'
+					).then((choice) => {
+						if (choice === 'Open System Settings') {
+							vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
+						} else if (choice === 'Run Probe') {
+							this.probeAccessibility();
+						}
+					});
+					// Also reflect the failure in the status pill via the
+					// native-status file so the inline help card appears.
+					try {
+						fs.writeFileSync(this._paths.nativeStatusFile, JSON.stringify({
+							ok: false, lastError: err, timedOut: isTimeout, at: Date.now()
+						}, null, 2));
+						this.refreshStatus();
+					} catch (_) { /* noop */ }
+				} else {
+					this._post({ type: 'note', data: 'Kick failed: ' + err });
+				}
 			}
 		} finally {
 			this._kickInFlight = false;
+			this._post({ type: 'kickInFlight', data: { active: false } });
 		}
 	}
 
