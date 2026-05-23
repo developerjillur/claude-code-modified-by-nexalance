@@ -139,7 +139,9 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	context.subscriptions.push({ dispose: () => provider.stopWatchers() });
+	context.subscriptions.push({ dispose: () => provider.stopPeriodicAutoKick() });
 	provider.startWatchers();
+	provider.startPeriodicAutoKick();
 }
 
 export function deactivate() { /* no-op */ }
@@ -149,11 +151,16 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	private _watchers: Array<{ close: () => void }> = [];
 	private _kickInFlight = false;
 	private _lastAutoKickAt = 0;
+	private _periodicTimer: NodeJS.Timeout | undefined;
 	private _paths: WorkspacePaths = currentPaths();
 
 	// Debounce / safety thresholds for auto-kick.
-	private static AUTO_KICK_COOLDOWN_MS = 60_000;       // don't auto-kick more than once per minute
-	private static HOOK_RECENT_THRESHOLD_MS = 30_000;    // hook fired in last 30s ⇒ Claude is active, leave it alone
+	// v0.2.13 — removed AUTO_KICK_COOLDOWN_MS; we now rely entirely on the
+	// hook-recency check, which is the more accurate signal of "Claude is
+	// active". A cooldown on TOP of recency just delayed kicking after
+	// Claude had clearly idle'd.
+	private static HOOK_RECENT_THRESHOLD_MS = 30_000;
+	private static PERIODIC_CHECK_INTERVAL_MS = 30_000;
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -354,12 +361,38 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	public _maybeAutoKick(): void {
 		if (this._kickInFlight) { return; }
 		const now = Date.now();
-		if (now - this._lastAutoKickAt < QueueProvider.AUTO_KICK_COOLDOWN_MS) { return; }
 		const lastHookFireAt = this._lastHookFireAt();
-		if (now - lastHookFireAt < QueueProvider.HOOK_RECENT_THRESHOLD_MS) { return; }
+		if (now - lastHookFireAt < QueueProvider.HOOK_RECENT_THRESHOLD_MS) {
+			// Hook fired recently — Claude is mid-flow, hook is draining the
+			// queue, leave it alone.
+			return;
+		}
 		// All clear — fire it.
 		this._lastAutoKickAt = now;
 		this._maybeKickHead('auto');
+	}
+
+	/**
+	 * Start a 30-second periodic check that unstucks the queue if Claude
+	 * Code stops firing Stop hooks for any reason (session ended, hook
+	 * timeout, etc.). The actual decision to kick is made by _maybeAutoKick
+	 * which has all the safeguards.
+	 */
+	public startPeriodicAutoKick(): void {
+		if (this._periodicTimer) { return; }
+		this._periodicTimer = setInterval(() => {
+			const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
+			if (!cfg.get<boolean>('autoKickWhenIdle', true)) { return; }
+			if (loadQueueFromFile(this._paths.queueFile).length === 0) { return; }
+			this._maybeAutoKick();
+		}, QueueProvider.PERIODIC_CHECK_INTERVAL_MS);
+	}
+
+	public stopPeriodicAutoKick(): void {
+		if (this._periodicTimer) {
+			clearInterval(this._periodicTimer);
+			this._periodicTimer = undefined;
+		}
 	}
 
 	private _lastHookFireAt(): number {

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.13] - 2026-05-23 — Periodic watchdog auto-kick (unstucks even when Claude Code stops firing the hook)
+
+### Diagnosed — Claude Code sometimes stops firing the Stop hook entirely
+
+After a manual test where the hook was invoked directly with the same workspace path, it correctly drained the queue 5 → 4 → 3 across two fires. But in the user's live session, only the initial fire was logged. Claude Code completed multiple subsequent turns and Phase-10.b work, yet the Stop hook was never invoked again. The hook is correct — Claude Code is the one failing to call it.
+
+This can happen for several reasons (session ended, hook output exceeded an internal limit, transient I/O block, etc.). Our event-driven model (only kick on `saveQueue` empty→non-empty + on `resolveWebviewView`) doesn't cover this case: the queue is already non-empty and the sidebar is already resolved, so neither trigger fires.
+
+### Added — 30-second periodic auto-kick watchdog
+
+The extension now runs a `setInterval(30_000)` watchdog. Every 30 seconds:
+
+1. If `claudeCodeModified.autoKickWhenIdle` is `false`, skip.
+2. If the queue is empty, skip.
+3. If a kick is currently in flight, skip.
+4. If the Stop hook fired in the last 30 seconds (Claude is mid-flow, hook is draining), skip.
+5. Otherwise: kick the head item via osascript / feedback fallback.
+
+This means: even if Claude Code stops firing the hook entirely, within 30 seconds the watchdog picks up the slack and types the next pending prompt into Claude's chat itself. As soon as Claude takes that new turn and stops, the hook chain (assuming it's working) drains everything else.
+
+### Changed — AUTO_KICK_COOLDOWN_MS removed
+
+The cooldown was on top of the hook-recency check, which is the more accurate signal of whether Claude is active. The cooldown alone just delayed kicks after Claude had clearly idle'd. The hook-recency check is now the only timing safeguard (plus the in-flight mutex).
+
 ## [0.2.12] - 2026-05-23 — Queue drains the whole Stop-hook chain
 
 ### Fixed — Only one item was firing per Claude continuation chain
