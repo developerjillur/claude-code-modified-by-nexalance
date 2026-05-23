@@ -2,41 +2,55 @@
 /*
  * Claude Mod by NexaLance — Stop hook for Claude Code.
  *
- * Runs every time Claude Code finishes a turn ("Stop"). Reads the next
- * pending prompt from the queue file written by the Claude Mod extension
- * and feeds it into Claude.
+ * v0.2.8 — per-workspace queues. The stop event JSON includes the working
+ * directory of the active Claude session (`cwd`). We derive the workspace
+ * data directory from that path and read/write the per-workspace
+ * queue / history / native-status files there. That way each project keeps
+ * its own queue, so a queued prompt for project A never fires when the user
+ * is working on project B.
  *
  * Two delivery strategies, in order:
  *
- *   1. NATIVE (preferred):  spawn osascript synchronously to activate VS
+ *   1. NATIVE (preferred): spawn osascript synchronously to activate VS
  *      Code, focus Anthropic's chat input via ⌘ Esc, paste the prompt, and
  *      press Return. The prompt appears in Claude's chat as a real user
- *      message — same look as if the user had typed it.
+ *      message.
  *
  *   2. FEEDBACK (fallback): if osascript fails (no Accessibility permission,
  *      osascript not on PATH, VS Code not running, etc.), return the prompt
- *      via the standard Claude Code Stop-hook decision `{decision:"block",
- *      reason:<prompt>}`. Claude continues with the reason as its next
- *      instruction, but the chat displays it under the "Stop hook feedback:"
- *      label instead of as a fresh user message.
+ *      via the standard Claude Code Stop-hook decision
+ *      `{decision:"block", reason:<prompt>}`. Claude continues with the
+ *      reason as its next instruction.
  *
- * Either way the queue advances and the prompt reaches Claude. The native
- * path is the prettier outcome but isn't always reachable, so a guaranteed
- * fallback is always in play.
- *
- * Loop protection: respects `stop_hook_active` from the incoming event so
- * we never trigger ourselves recursively.
+ * Loop protection: respects `stop_hook_active` from the incoming event.
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const cp = require('child_process');
+const crypto = require('crypto');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const QUEUE_FILE = path.join(CLAUDE_DIR, 'claude-mod-queue.json');
-const HISTORY_FILE = path.join(CLAUDE_DIR, 'claude-mod-history.json');
+const WORKSPACES_ROOT = path.join(CLAUDE_DIR, 'claude-mod-queues');
 const MAX_HISTORY = 50;
+
+function workspaceSafeName(workspacePath) {
+	const baseRaw = path.basename(workspacePath || 'default') || 'workspace';
+	const safe = baseRaw.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'workspace';
+	const hash = crypto.createHash('sha1').update(workspacePath || 'default').digest('hex').slice(0, 8);
+	return safe + '-' + hash;
+}
+
+function pathsForWorkspace(workspacePath) {
+	const dir = path.join(WORKSPACES_ROOT, workspaceSafeName(workspacePath));
+	return {
+		dir: dir,
+		queueFile: path.join(dir, 'queue.json'),
+		historyFile: path.join(dir, 'history.json'),
+		nativeStatusFile: path.join(dir, 'native-status.json')
+	};
+}
 
 function atomicWrite(target, contents) {
 	const dir = path.dirname(target);
@@ -46,40 +60,27 @@ function atomicWrite(target, contents) {
 	fs.renameSync(tmp, target);
 }
 
-function appendHistory(text) {
+function appendHistory(historyFile, text) {
 	let entries = [];
-	if (fs.existsSync(HISTORY_FILE)) {
+	if (fs.existsSync(historyFile)) {
 		try {
-			const parsed = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+			const parsed = JSON.parse(fs.readFileSync(historyFile, 'utf8'));
 			if (Array.isArray(parsed)) { entries = parsed; }
 		} catch (_) { /* corrupt → start fresh */ }
 	}
 	entries.push({ text: text, firedAt: Date.now() });
 	if (entries.length > MAX_HISTORY) { entries = entries.slice(-MAX_HISTORY); }
-	try {
-		atomicWrite(HISTORY_FILE, JSON.stringify(entries, null, 2));
-	} catch (err) {
-		process.stderr.write('[claude-mod stop-hook] history write failed: ' + err.message + '\n');
-	}
+	try { atomicWrite(historyFile, JSON.stringify(entries, null, 2)); }
+	catch (err) { process.stderr.write('[claude-mod stop-hook] history write failed: ' + err.message + '\n'); }
 }
 
-/**
- * Try to type the prompt into Claude's chat as a real user message via
- * macOS scripting. Returns true on success, false on any failure.
- *
- * Bypassable: set CLAUDE_MOD_DISABLE_NATIVE=1 in the environment to force
- * the feedback fallback (useful for headless / CI / debugging).
- */
-function tryNativeSubmit(text) {
+function tryNativeSubmit(text, nativeStatusFile) {
 	if (process.platform !== 'darwin') { return false; }
 	if (process.env.CLAUDE_MOD_DISABLE_NATIVE === '1') { return false; }
 
 	const tmp = path.join(os.tmpdir(), 'claude-mod-hook-' + Date.now() + '-' + Math.floor(Math.random() * 1e6) + '.txt');
-	try {
-		fs.writeFileSync(tmp, text);
-	} catch (_) {
-		return false;
-	}
+	try { fs.writeFileSync(tmp, text); }
+	catch (_) { return false; }
 
 	const escapedPath = tmp.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 	const script = `
@@ -105,26 +106,15 @@ function tryNativeSubmit(text) {
 	try {
 		const stdout = cp.execFileSync('osascript', ['-e', script], {
 			encoding: 'utf8',
-			// 2 seconds is plenty for the happy path (activate + 3 keystrokes ≈ 600ms).
-			// Longer timeouts mostly help nothing — if osascript hangs that long it's
-			// almost certainly waiting on a missing Accessibility / Automation
-			// permission, which won't resolve mid-call. Bail fast so Claude Code's
-			// Stop event isn't blocked, and fall back to the feedback path.
 			timeout: 2000
 		});
 		return typeof stdout === 'string' && stdout.trim() === 'ok';
 	} catch (err) {
 		const msg = (err && err.message || String(err)).toString();
 		process.stderr.write('[claude-mod stop-hook] osascript failed: ' + msg + '\n');
-		// Write a one-line breadcrumb the extension can surface in the UI
-		// so the user knows native submit is failing + why.
 		try {
-			const flagPath = path.join(CLAUDE_DIR, 'claude-mod-native-status.json');
-			atomicWrite(flagPath, JSON.stringify({
-				ok: false,
-				lastError: msg,
-				timedOut: msg.indexOf('ETIMEDOUT') >= 0,
-				at: Date.now()
+			atomicWrite(nativeStatusFile, JSON.stringify({
+				ok: false, lastError: msg, timedOut: msg.indexOf('ETIMEDOUT') >= 0, at: Date.now()
 			}, null, 2));
 		} catch (_) { /* noop */ }
 		return false;
@@ -145,10 +135,18 @@ process.stdin.on('end', () => {
 		return;
 	}
 
+	// Pick the workspace from the event. `cwd` is set by Claude Code to the
+	// session's working directory. Fall back to our own process cwd if for
+	// some reason the event lacks it.
+	const workspacePath = (event && typeof event.cwd === 'string' && event.cwd)
+		|| process.cwd()
+		|| '__no-workspace__';
+	const p = pathsForWorkspace(workspacePath);
+
 	let queue = [];
-	if (fs.existsSync(QUEUE_FILE)) {
+	if (fs.existsSync(p.queueFile)) {
 		try {
-			const parsed = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8'));
+			const parsed = JSON.parse(fs.readFileSync(p.queueFile, 'utf8'));
 			if (Array.isArray(parsed)) { queue = parsed; }
 		} catch (_) { queue = []; }
 	}
@@ -164,7 +162,7 @@ process.stdin.on('end', () => {
 		: typeof first === 'string' ? first : '';
 
 	try {
-		atomicWrite(QUEUE_FILE, JSON.stringify(queue, null, 2));
+		atomicWrite(p.queueFile, JSON.stringify(queue, null, 2));
 	} catch (err) {
 		process.stderr.write('[claude-mod stop-hook] could not write queue file: ' + err.message + '\n');
 		process.stdout.write(JSON.stringify({}));
@@ -176,22 +174,16 @@ process.stdin.on('end', () => {
 		return;
 	}
 
-	appendHistory(text);
+	appendHistory(p.historyFile, text);
 
-	// Preferred: native user-message look via osascript.
-	if (tryNativeSubmit(text)) {
-		// On success, clear the "native failing" breadcrumb so the UI
-		// reflects the current healthy state.
+	if (tryNativeSubmit(text, p.nativeStatusFile)) {
 		try {
-			const flagPath = path.join(CLAUDE_DIR, 'claude-mod-native-status.json');
-			atomicWrite(flagPath, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
+			atomicWrite(p.nativeStatusFile, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
 		} catch (_) { /* noop */ }
 		process.stdout.write(JSON.stringify({}));
 		return;
 	}
 
-	// Fallback: Stop-hook feedback (shows the "Stop hook feedback:" prefix
-	// in Claude's chat but still gets the prompt into Claude's context).
 	process.stdout.write(JSON.stringify({
 		decision: 'block',
 		reason: text

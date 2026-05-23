@@ -1,51 +1,68 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import { getWebviewHtml } from './webview';
 import * as cp from 'child_process';
+import { getWebviewHtml } from './webview';
 import {
-	getPaths,
+	getPathsForWorkspace,
+	getPathsForFallback,
 	installHook,
 	uninstallHook,
 	isHookInstalled,
 	loadQueueFromFile,
 	saveQueueToFile,
 	loadHistoryFromFile,
+	loadNativeStatus,
 	refreshStableHookScript,
 	saveBase64Image,
 	getAttachmentsDir,
-	loadNativeStatus
+	migrateLegacyGlobalQueue,
+	WorkspacePaths
 } from './hook-setup';
 import { kickClaudeCodeChat } from './auto-kick';
 
+function currentWorkspacePath(): string {
+	const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	return ws || '__no-workspace__';
+}
+
+function currentPaths(): WorkspacePaths {
+	const ws = currentWorkspacePath();
+	return ws === '__no-workspace__' ? getPathsForFallback() : getPathsForWorkspace(ws);
+}
+
 export function activate(context: vscode.ExtensionContext) {
-	// Every activation copies the latest bundled hook script into the stable
-	// location at ~/.claude/claude-mod-hook.js. This way, when the extension
-	// updates to a new version, the hook reference in settings.json keeps
-	// working without the user having to re-run the install button.
 	try {
-		const refreshed = refreshStableHookScript(context.extensionPath);
-		if (refreshed) {
-			console.log('[claude-mod] hook script at stable path refreshed');
-		}
+		refreshStableHookScript(context.extensionPath);
 	} catch (err: any) {
 		console.warn('[claude-mod] could not refresh hook script:', err.message);
 	}
 
-	// Migration: if a previous version (< 0.2.1) installed the hook with the
-	// command pointing at the extension's versioned install folder, the path
-	// breaks every time the extension updates. Detect that and re-install so
-	// the command points at the stable ~/.claude/claude-mod-hook.js path.
+	// Per-workspace migration: v0.2.7 stored a single global queue at
+	// ~/.claude/claude-mod-queue.json. Move its contents (if any) into the
+	// current workspace's queue on first activation of v0.2.8.
 	try {
-		const paths = getPaths();
+		const migration = migrateLegacyGlobalQueue(currentWorkspacePath());
+		if (migration.itemsMigrated > 0 || migration.historyMigrated > 0) {
+			vscode.window.showInformationMessage(
+				`Claude Mod: migrated ${migration.itemsMigrated} pending item(s) and ${migration.historyMigrated} history entr(ies) from the old global queue into this workspace.`
+			);
+		}
+	} catch (err: any) {
+		console.warn('[claude-mod] legacy queue migration failed:', err.message);
+	}
+
+	// Auto-migrate the Stop-hook command in settings.json: if it points at a
+	// versioned extension folder (from older releases) instead of the stable
+	// path, re-install so the reference survives future updates.
+	try {
+		const paths = currentPaths();
 		if (isHookInstalled()) {
 			const settings = JSON.parse(fs.readFileSync(paths.settingsFile, 'utf8'));
 			const ourEntry = (settings.hooks?.Stop || []).find((h: any) =>
 				JSON.stringify(h).includes('claude-mod-stop-hook')
 			);
 			const cmd: string = ourEntry?.hooks?.[0]?.command || '';
-			const pointsAtStable = cmd.includes(paths.hookScript);
-			if (!pointsAtStable) {
-				console.log('[claude-mod] migrating hook from versioned path → stable path');
+			if (!cmd.includes(paths.hookScript)) {
 				installHook(context.extensionPath);
 			}
 		}
@@ -96,19 +113,22 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('claude-code-modified.openAccessibilityPrefs', async () => {
-			// Open the macOS Privacy → Automation pane so the user can grant
-			// VS Code permission to control System Events. The url-scheme
-			// `x-apple.systempreferences:` is the documented way to deep-link.
-			await vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
-		})
-	);
-
-	context.subscriptions.push(
 		vscode.commands.registerCommand('claude-code-modified.probeAccessibility', async () => {
 			await provider.probeAccessibility();
 		})
 	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('claude-code-modified.openAccessibilityPrefs', async () => {
+			await vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
+		})
+	);
+
+	// When the user switches workspace folders inside VS Code, our paths
+	// change — reload from the new workspace's files.
+	context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+		provider.handleWorkspaceChange();
+	}));
 
 	const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
 	if (cfg.get<boolean>('autoOpenOnStartup', true)) {
@@ -118,7 +138,6 @@ export function activate(context: vscode.ExtensionContext) {
 		}, 600);
 	}
 
-	// File watching — see QueueProvider.startWatchers for the implementation.
 	context.subscriptions.push({ dispose: () => provider.stopWatchers() });
 	provider.startWatchers();
 }
@@ -129,6 +148,7 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	private _watchers: Array<{ close: () => void }> = [];
 	private _kickInFlight = false;
+	private _paths: WorkspacePaths = currentPaths();
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -137,7 +157,6 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		view.webview.options = { enableScripts: true };
 		view.webview.html = getWebviewHtml();
 		view.webview.onDidReceiveMessage((msg) => this._handleMessage(msg));
-
 		this.pushQueueFromDisk();
 		this.pushHistoryFromDisk();
 		this.refreshStatus();
@@ -148,25 +167,13 @@ class QueueProvider implements vscode.WebviewViewProvider {
 			case 'saveQueue':
 				if (Array.isArray(msg.data)) {
 					try {
-						saveQueueToFile(msg.data);
+						saveQueueToFile(this._paths.queueFile, msg.data);
 					} catch (err: any) {
 						this._post({ type: 'note', data: 'Could not save queue: ' + err.message });
 					}
-					// NOTE: v0.2.4's "auto-kick on queue add" path has been
-					// removed in v0.2.5. It was firing one kick per saveQueue
-					// transition, and since every addPrompt persists, a quick
-					// sequence of prompt-adds while Claude was already busy
-					// produced a barrage of kicks all aimed at a Claude that
-					// was still processing the previous one. Two safer
-					// trigger paths remain: (1) the Stop hook drains the
-					// queue when Claude finishes each turn, (2) the user
-					// clicks the green "Fire now" button when they want to
-					// push the head into Claude's chat from an idle state.
 				}
 				return;
 			case 'fireNow':
-				// Manual button click — always try to kick, regardless of state.
-				// Guarded against rapid double-clicks by an in-flight flag.
 				if (this._kickInFlight) {
 					this._post({ type: 'note', data: 'A kick is already in flight — give it a moment.' });
 					return;
@@ -191,17 +198,10 @@ class QueueProvider implements vscode.WebviewViewProvider {
 				this.refreshStatus();
 				this.pushHistoryFromDisk();
 				return;
-			case 'probeAccessibility':
-				this.probeAccessibility();
-				return;
-			case 'openAccessibilityPrefs':
-				vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
-				return;
 			case 'clearHistory':
 				try {
-					const paths = getPaths();
-					if (fs.existsSync(paths.historyFile)) {
-						fs.writeFileSync(paths.historyFile, '[]');
+					if (fs.existsSync(this._paths.historyFile)) {
+						fs.writeFileSync(this._paths.historyFile, '[]');
 					}
 				} catch (_) { /* noop */ }
 				this.pushHistoryFromDisk();
@@ -227,6 +227,12 @@ class QueueProvider implements vscode.WebviewViewProvider {
 					this._post({ type: 'note', data: 'Could not save pasted image: ' + err.message });
 				}
 				return;
+			case 'probeAccessibility':
+				this.probeAccessibility();
+				return;
+			case 'openAccessibilityPrefs':
+				vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
+				return;
 		}
 	}
 
@@ -235,53 +241,55 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	}
 
 	public pushQueueFromDisk(): void {
-		this._post({ type: 'restoreQueue', data: loadQueueFromFile() });
+		this._post({ type: 'restoreQueue', data: loadQueueFromFile(this._paths.queueFile) });
 	}
 
 	public pushHistoryFromDisk(): void {
-		this._post({ type: 'history', data: loadHistoryFromFile() });
+		this._post({ type: 'history', data: loadHistoryFromFile(this._paths.historyFile) });
 	}
 
 	public refreshStatus(): void {
 		this._post({
 			type: 'status',
 			data: {
-				...getPaths(),
+				queueFile: this._paths.queueFile,
+				historyFile: this._paths.historyFile,
+				nativeStatusFile: this._paths.nativeStatusFile,
+				hookScript: this._paths.hookScript,
+				settingsFile: this._paths.settingsFile,
+				workspacePath: this._paths.workspacePath,
 				hookInstalled: isHookInstalled(),
-				nativeStatus: loadNativeStatus()
+				nativeStatus: loadNativeStatus(this._paths.nativeStatusFile)
 			}
 		});
 	}
 
-	/**
-	 * Try a very lightweight osascript probe to surface Accessibility /
-	 * Automation permission state in the UI. On success, writes ok=true to
-	 * the native-status file. On failure (most commonly timeout because the
-	 * permission isn't granted), writes the error and the UI prompts the
-	 * user to open System Settings.
-	 *
-	 * The first time this runs on a system that hasn't granted the
-	 * permission, macOS shows the standard "Visual Studio Code wants to
-	 * control System Events" prompt — clicking Allow grants the permission.
-	 */
+	public handleWorkspaceChange(): void {
+		this.stopWatchers();
+		this._paths = currentPaths();
+		this.startWatchers();
+		this.pushQueueFromDisk();
+		this.pushHistoryFromDisk();
+		this.refreshStatus();
+	}
+
 	public async probeAccessibility(): Promise<void> {
 		if (process.platform !== 'darwin') {
-			this._post({ type: 'note', data: 'Native submit is macOS-only. On other platforms the queue uses Stop-hook feedback delivery, which always works.' });
+			this._post({ type: 'note', data: 'Native submit is macOS-only.' });
 			return;
 		}
-		const paths = getPaths();
-		this._post({ type: 'note', data: 'Probing macOS Accessibility… if no permission yet, watch for a "Visual Studio Code wants to control System Events" prompt.' });
+		this._post({ type: 'note', data: 'Probing macOS Accessibility…' });
 		try {
 			cp.execFileSync(
 				'osascript',
 				['-e', 'tell application "System Events" to get name of first application process'],
 				{ encoding: 'utf8', timeout: 2500 }
 			);
-			fs.writeFileSync(paths.nativeStatusFile, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
+			fs.writeFileSync(this._paths.nativeStatusFile, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
 			this._post({ type: 'note', data: '✓ Accessibility permission OK — native submit will work for the next Stop hook fire.' });
 		} catch (err: any) {
 			const msg = (err && err.message || String(err)).toString();
-			fs.writeFileSync(paths.nativeStatusFile, JSON.stringify({
+			fs.writeFileSync(this._paths.nativeStatusFile, JSON.stringify({
 				ok: false, lastError: msg, timedOut: msg.indexOf('ETIMEDOUT') >= 0, at: Date.now()
 			}, null, 2));
 			this._post({
@@ -292,24 +300,6 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		this.refreshStatus();
 	}
 
-	/**
-	 * Returns true if the Stop hook fired in the last 45 seconds — used as a
-	 * proxy signal for "Claude is busy / mid-flow". When true, auto-kick
-	 * suppresses itself because the hook is already draining the queue.
-	 */
-	private _hookFiredRecently(): boolean {
-		const history = loadHistoryFromFile();
-		if (history.length === 0) { return false; }
-		const last = history[history.length - 1];
-		const age = Date.now() - (last.firedAt || 0);
-		return age < 45_000;
-	}
-
-	/**
-	 * Take the head item off the queue and push it into Claude's chat input
-	 * via osascript. On failure (denied permissions, osascript error, etc.),
-	 * the item is put back at the head so nothing is lost.
-	 */
 	public async firePendingNow(): Promise<void> {
 		await this._maybeKickHead('manual');
 	}
@@ -318,7 +308,7 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		if (this._kickInFlight) { return; }
 		this._kickInFlight = true;
 		try {
-			const queue = loadQueueFromFile();
+			const queue = loadQueueFromFile(this._paths.queueFile);
 			if (queue.length === 0) {
 				if (reason === 'manual') {
 					this._post({ type: 'note', data: 'Queue is empty — nothing to fire.' });
@@ -327,28 +317,21 @@ class QueueProvider implements vscode.WebviewViewProvider {
 			}
 			const head = queue[0];
 			const rest = queue.slice(1);
-			// Remove from queue first so the Stop hook (if it fires concurrently)
-			// can't also consume this same item.
-			saveQueueToFile(rest);
+			saveQueueToFile(this._paths.queueFile, rest);
 			this._post({ type: 'restoreQueue', data: rest });
 
 			const result = await kickClaudeCodeChat(head.text || '');
 			if (result.success) {
-				// Log the fire to the history file so it appears in the same
-				// "Last fired by hook" panel the Stop-hook fires use — no
-				// separate, accumulating "Auto-kicked Claude with:" notes
-				// cluttering the UI. The panel already has a Clear button.
 				try { this._appendHistory(head.text || ''); } catch (_) { /* noop */ }
 				this.pushHistoryFromDisk();
 			} else {
-				// Put it back at the head — try again next time
 				const restored = [head, ...rest];
-				saveQueueToFile(restored);
+				saveQueueToFile(this._paths.queueFile, restored);
 				this._post({ type: 'restoreQueue', data: restored });
 				this._post({
 					type: 'note',
 					data: 'Kick failed: ' + (result.error || 'unknown') +
-						'\nFirst run requires macOS Accessibility permission for VS Code (System Settings → Privacy & Security → Accessibility).'
+						'\nFirst run requires macOS Accessibility permission for VS Code (System Settings → Privacy & Security → Accessibility / Automation).'
 				});
 			}
 		} finally {
@@ -357,53 +340,34 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	}
 
 	private _appendHistory(text: string): void {
-		const paths = getPaths();
 		let entries: Array<{ text: string; firedAt: number }> = [];
-		if (fs.existsSync(paths.historyFile)) {
+		if (fs.existsSync(this._paths.historyFile)) {
 			try {
-				const parsed = JSON.parse(fs.readFileSync(paths.historyFile, 'utf8'));
+				const parsed = JSON.parse(fs.readFileSync(this._paths.historyFile, 'utf8'));
 				if (Array.isArray(parsed)) { entries = parsed; }
 			} catch (_) { /* corrupt → start fresh */ }
 		}
 		entries.push({ text, firedAt: Date.now() });
 		if (entries.length > 50) { entries = entries.slice(-50); }
-		fs.writeFileSync(paths.historyFile, JSON.stringify(entries, null, 2));
+		fs.writeFileSync(this._paths.historyFile, JSON.stringify(entries, null, 2));
 	}
 
-	/**
-	 * Watch the queue + history + settings files so the UI reflects external
-	 * changes (the hook script consuming items, the user editing settings).
-	 *
-	 * Implementation notes:
-	 *  - `fs.watch` is the fast/responsive path on most OSes but is known to
-	 *    miss events on macOS when changes come from a different process.
-	 *  - `fs.watchFile` polls every N ms — slower but never misses, and works
-	 *    even when the file is recreated by rename (which is what our atomic
-	 *    write does).
-	 *  - We use BOTH: watch for responsiveness, watchFile for reliability.
-	 */
 	public startWatchers(): void {
-		const paths = getPaths();
 		const targets: Array<[string, () => void]> = [
-			[paths.queueFile, () => this.pushQueueFromDisk()],
-			[paths.historyFile, () => this.pushHistoryFromDisk()],
-			[paths.settingsFile, () => this.refreshStatus()],
+			[this._paths.queueFile, () => this.pushQueueFromDisk()],
+			[this._paths.historyFile, () => this.pushHistoryFromDisk()],
+			[this._paths.settingsFile, () => this.refreshStatus()],
+			[this._paths.nativeStatusFile, () => this.refreshStatus()],
 		];
-
 		for (const [file, onChange] of targets) {
-			// fs.watchFile (polling) — reliable, works through atomic renames.
 			fs.watchFile(file, { interval: 800 }, () => onChange());
 			this._watchers.push({ close: () => fs.unwatchFile(file) });
-
-			// fs.watch — responsive on platforms that support it. If the file
-			// doesn't exist yet (the hook hasn't fired), watching the parent
-			// directory catches the create event so we can attach later.
 			try {
 				if (fs.existsSync(file)) {
 					const w = fs.watch(file, { persistent: false }, () => onChange());
 					this._watchers.push({ close: () => w.close() });
 				}
-			} catch (_) { /* fs.watch can fail on some FS; polling fallback covers us */ }
+			} catch (_) { /* polling fallback covers us */ }
 		}
 	}
 

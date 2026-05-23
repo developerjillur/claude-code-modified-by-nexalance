@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.2.8] - 2026-05-23 — Per-workspace queues
+
+### Changed — Queues are now scoped to the project / workspace
+
+v0.2.7 stored one global queue at `~/.claude/claude-mod-queue.json`. Items added while working on project A were visible — and would fire — when switching to project B. Not what most users want.
+
+v0.2.8 keeps queue, history, and native-status per workspace:
+
+```
+~/.claude/claude-mod-queues/
+  Kvanti-3-a3f5b2c1/
+    queue.json
+    history.json
+    native-status.json
+  psychgate-c41fd9a3/
+    queue.json
+    history.json
+    native-status.json
+  ...
+```
+
+- The workspace directory name combines a sanitized basename with a short SHA-1 hash of the absolute path, so it's stable across runs and tells you at a glance which project the dir belongs to.
+- The **extension** resolves the workspace from `vscode.workspace.workspaceFolders[0].uri.fsPath`. Switching folders inside VS Code re-points the panel automatically.
+- The **hook script** resolves the workspace from the Stop event's `cwd` field. Each Claude Code session reads/writes only its own project's queue.
+- A **one-time migration** on first activation moves any existing `~/.claude/claude-mod-queue.json` contents into the current workspace's queue and renames the legacy file to `.migrated`.
+
+### Self-tests
+
+```
+=== Per-workspace queue isolation (v0.2.8 core feature) ===
+  ✓ workspace A has its own 2 items
+  ✓ workspace B has its own 1 item
+  ✓ hook with cwd=A returns A first prompt
+  ✓ A queue now has 1 item
+  ✓ B queue is UNTOUCHED (still 1 item)
+  ✓ B item is unchanged
+  ✓ hook with cwd=B returns B first prompt
+  ✓ B queue is now empty
+  ✓ A queue still has 1 item (cross-workspace isolation holds)
+  ✓ A history has only A entry
+  ✓ B history has only B entry
+=== getPathsForWorkspace returns workspace-scoped paths ===
+  ✓ different workspaces → different queue files
+=== hook source ===
+  ✓ hook source reads workspace from event.cwd
+```
+
+Plus all 60+ prior assertions still green.
+
 ## [0.2.7] - 2026-05-23 — Native-submit setup flow + 2s timeout
 
 ### Diagnosed — v0.2.6 fell back to feedback because Accessibility permission was missing
