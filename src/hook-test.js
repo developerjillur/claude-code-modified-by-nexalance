@@ -193,12 +193,34 @@ try {
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
-	console.log('\n=== Stop-event loop protection ===');
-	writeQueue(TEST_WORKSPACE_A, [{ id: 'x', text: 'should not fire', createdAt: 1 }]);
+	console.log('\n=== v0.2.12 — drain continues across stop_hook_active chain ===');
+	// Before v0.2.12 the hook bailed instantly when stop_hook_active=true,
+	// which capped each Stop-chain to exactly one consumed item. Now the
+	// queue drains the entire chain, capped only by the per-chain safety.
+	writeQueue(TEST_WORKSPACE_A, [
+		{ id: 'c1', text: 'chain-1', createdAt: 1 },
+		{ id: 'c2', text: 'chain-2', createdAt: 2 }
+	]);
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A, stop_hook_active: true }));
 	out = JSON.parse(r.stdout);
-	assert(!out.decision, 'stop_hook_active → no consumption');
-	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'queue preserved during loop protection');
+	assert(out.decision === 'block' && out.reason === 'chain-1', 'stop_hook_active=true still drains queue (was the v0.2.11 bug)');
+	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'queue advanced from 2 → 1 even with stop_hook_active=true');
+	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A, stop_hook_active: true }));
+	out = JSON.parse(r.stdout);
+	assert(out.decision === 'block' && out.reason === 'chain-2', 'second fire with stop_hook_active continues to drain');
+	assert(readQueue(TEST_WORKSPACE_A).length === 0, 'queue fully drained');
+
+	// And the consecutive-block safety cap kicks in eventually.
+	console.log('\n=== v0.2.12 — consecutive-block safety cap ===');
+	// Pre-seed the chain counter past the cap to verify it bails.
+	const chainFile = path.join(wsDir(TEST_WORKSPACE_A), 'block-chain.json');
+	fs.writeFileSync(chainFile, JSON.stringify({ count: 250, at: Date.now() }));
+	writeQueue(TEST_WORKSPACE_A, [{ id: 'safety', text: 'should be capped', createdAt: 1 }]);
+	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A, stop_hook_active: true }));
+	out = JSON.parse(r.stdout);
+	assert(!out.decision, 'count > MAX_CONSECUTIVE_BLOCK_FIRES → no decision (cap honoured)');
+	// Reset for next tests
+	try { fs.unlinkSync(chainFile); } catch (_) {}
 
 	console.log('\n=== Native-vs-feedback paths ===');
 	const hookSrc = fs.readFileSync(BUNDLED_HOOK, 'utf8');

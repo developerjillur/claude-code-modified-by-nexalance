@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.12] - 2026-05-23 — Queue drains the whole Stop-hook chain
+
+### Fixed — Only one item was firing per Claude continuation chain
+
+Symptom (visible to the user): hook fired once, queue went from 7 → 6, then nothing else happened even as Claude completed multiple subsequent turns.
+
+Root cause: when our hook returns `{decision:"block", reason:...}` Claude continues, completes the work, then fires the next Stop event with `stop_hook_active: true`. Previous versions treated that flag as a hard "loop-protection: bail" signal and returned `{}` immediately. So the queue only ever drained ONE item per continuation chain. Every subsequent Stop in the same chain was ignored.
+
+This was over-defensive. Our hook is safe to fire repeatedly because **it drains the queue every fire** — the queue is naturally bounded, so a real infinite loop is impossible. The `stop_hook_active` check belonged to hooks that always emit `decision:block` (those would loop forever); ours doesn't, so the check just stalled normal usage.
+
+### How v0.2.12 handles it
+
+- The early `if (stop_hook_active) return {}` is removed. Every Stop fire drains one queue item until the queue is empty.
+- A new per-workspace `block-chain.json` counter tracks consecutive `decision:block` fires within a 5-minute window. If we ever fire more than **200 consecutive block-responses** in a single chain (truly pathological — would only happen with a multi-hundred-item queue that all use the feedback fallback path), we let Claude stop as a last-resort safety. Resets automatically after 5 minutes of idle.
+- When osascript native submit succeeds, that path doesn't carry `stop_hook_active` forward at all — each item becomes a clean separate user turn. The cap only matters for the feedback fallback path.
+
+### Tests
+
+```
+=== v0.2.12 — drain continues across stop_hook_active chain ===
+  ✓ stop_hook_active=true still drains queue (was the v0.2.11 bug)
+  ✓ queue advanced from 2 → 1 even with stop_hook_active=true
+  ✓ second fire with stop_hook_active continues to drain
+  ✓ queue fully drained
+=== v0.2.12 — consecutive-block safety cap ===
+  ✓ count > MAX_CONSECUTIVE_BLOCK_FIRES → no decision (cap honoured)
+```
+
 ## [0.2.11] - 2026-05-23 — Hardening pass (gaps audit + improvements)
 
 ### Fixed — Workspace dir mismatch when paths weren't canonicalized

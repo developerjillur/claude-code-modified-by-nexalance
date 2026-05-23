@@ -141,6 +141,17 @@ function tryNativeSubmit(text, nativeStatusFile) {
 	}
 }
 
+// SAFETY: hard cap on how many consecutive block+reason fires we'll do
+// before we let Claude actually stop and wait for fresh user input. This
+// matters only if osascript native submit is not working — when native
+// submit succeeds, each fire is a separate user turn with no
+// stop_hook_active flag carrying over. When we have to fall back to
+// decision:block, every subsequent Stop event in the same chain has
+// stop_hook_active=true; that's fine for us (queue is bounded), but if
+// the user has queued thousands of items we don't want one chain to
+// monopolise Claude for hours. 200 is plenty for normal use.
+const MAX_CONSECUTIVE_BLOCK_FIRES = 200;
+
 let stdinBuf = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { stdinBuf += chunk; });
@@ -148,10 +159,13 @@ process.stdin.on('end', () => {
 	let event = {};
 	try { event = JSON.parse(stdinBuf || '{}'); } catch (_) { /* tolerate non-JSON */ }
 
-	if (event && event.stop_hook_active) {
-		process.stdout.write(JSON.stringify({}));
-		return;
-	}
+	// NOTE: v0.2.12 — we deliberately do NOT bail when stop_hook_active is
+	// true. Earlier versions did, but that meant the queue only drained one
+	// item per Claude continuation chain — every subsequent Stop event in
+	// the same chain returned {} immediately and the remaining queue sat.
+	// Our hook is safe to fire repeatedly because it drains (shifts) the
+	// queue every time; the queue is naturally bounded, so no infinite-loop
+	// risk. The MAX_CONSECUTIVE_BLOCK_FIRES cap above is the only safety.
 
 	// Pick the workspace from the event. `cwd` is set by Claude Code to the
 	// session's working directory. Fall back to our own process cwd if for
@@ -198,6 +212,31 @@ process.stdin.on('end', () => {
 		try {
 			atomicWrite(p.nativeStatusFile, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
 		} catch (_) { /* noop */ }
+		process.stdout.write(JSON.stringify({}));
+		return;
+	}
+
+	// Feedback fallback. Before emitting the decision:block, check how many
+	// consecutive block-fires we've done in this chain — if we're past the
+	// safety cap, let Claude stop instead.
+	const chainFile = path.join(p.dir, 'block-chain.json');
+	let chain = { count: 0, at: 0 };
+	if (fs.existsSync(chainFile)) {
+		try {
+			const parsed = JSON.parse(fs.readFileSync(chainFile, 'utf8'));
+			if (parsed && typeof parsed.count === 'number') { chain = parsed; }
+		} catch (_) { /* fall through */ }
+	}
+	// Reset the counter if the previous block was more than 5 minutes ago
+	// — that almost certainly means a fresh user-initiated turn, not a
+	// continuation of the same chain.
+	if (Date.now() - (chain.at || 0) > 5 * 60 * 1000) { chain.count = 0; }
+	chain.count = (chain.count || 0) + 1;
+	chain.at = Date.now();
+	try { atomicWrite(chainFile, JSON.stringify(chain, null, 2)); } catch (_) { /* noop */ }
+
+	if (chain.count > MAX_CONSECUTIVE_BLOCK_FIRES) {
+		process.stderr.write('[claude-mod stop-hook] hit MAX_CONSECUTIVE_BLOCK_FIRES, letting Claude stop\n');
 		process.stdout.write(JSON.stringify({}));
 		return;
 	}
