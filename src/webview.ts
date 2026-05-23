@@ -500,7 +500,7 @@ export function getWebviewHtml(): string {
 	<div class="app-header">
 		<span class="app-title">Claude Mod <small>by NexaLance</small></span>
 		<span class="id-pill" title="This is the Claude Mod queue manager. The actual Claude Code chat happens in Anthropic's official extension. This panel only manages the pending queue and feeds prompts via the Stop hook.">
-			<span class="dot"></span>v0.2.13 · Watchdog
+			<span class="dot"></span>v0.2.14 · Source-tagged
 		</span>
 	</div>
 

@@ -161,6 +161,10 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	// Claude had clearly idle'd.
 	private static HOOK_RECENT_THRESHOLD_MS = 30_000;
 	private static PERIODIC_CHECK_INTERVAL_MS = 30_000;
+	// If we kicked but no hook fire has happened in 5 minutes, assume
+	// Claude is stuck or the hook is broken; re-kick as a recovery. Long
+	// enough that real long-running Claude turns won't trigger it.
+	private static KICK_MAX_WAIT_MS = 5 * 60_000;
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -362,14 +366,36 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		if (this._kickInFlight) { return; }
 		const now = Date.now();
 		const lastHookFireAt = this._lastHookFireAt();
-		if (now - lastHookFireAt < QueueProvider.HOOK_RECENT_THRESHOLD_MS) {
-			// Hook fired recently — Claude is mid-flow, hook is draining the
-			// queue, leave it alone.
+		const lastKickAt = this._lastAutoKickAt;
+
+		// CASE A: hook fired AFTER our last extension kick → Claude finished
+		// the kicked item (and possibly more via hook chain). If Claude has
+		// been idle for HOOK_RECENT_THRESHOLD_MS since that finish, kick the
+		// next item.
+		if (lastHookFireAt > lastKickAt) {
+			if (now - lastHookFireAt >= QueueProvider.HOOK_RECENT_THRESHOLD_MS) {
+				this._lastAutoKickAt = now;
+				this._maybeKickHead('auto');
+			}
 			return;
 		}
-		// All clear — fire it.
-		this._lastAutoKickAt = now;
-		this._maybeKickHead('auto');
+
+		// CASE B: hook hasn't fired since our last kick. Claude might still
+		// be processing the kicked item (most common) — wait. But if we've
+		// been waiting longer than KICK_MAX_WAIT_MS, something is wrong
+		// (hook is broken, Claude crashed, etc.) and we should re-kick.
+		if (lastKickAt === 0) {
+			// Never kicked yet — fire right away.
+			this._lastAutoKickAt = now;
+			this._maybeKickHead('auto');
+			return;
+		}
+		if (now - lastKickAt >= QueueProvider.KICK_MAX_WAIT_MS) {
+			// Waited long enough — re-kick.
+			this._lastAutoKickAt = now;
+			this._maybeKickHead('auto');
+		}
+		// Else: still waiting for Claude / hook to respond to our last kick.
 	}
 
 	/**
@@ -395,11 +421,27 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
+	/**
+	 * Returns the timestamp of the most recent REAL hook fire (where Claude
+	 * Code actually invoked our hook because a Claude turn ended).
+	 * Extension-kick entries are filtered out — they're when WE initiated a
+	 * turn, not when Claude finished one. Letting them count would make the
+	 * watchdog fire a second kick 30s after the first while Claude was
+	 * still processing.
+	 *
+	 * Backwards-compat: entries without a source field (from versions
+	 * before v0.2.14) are treated as 'hook' fires.
+	 */
 	private _lastHookFireAt(): number {
 		const hist = loadHistoryFromFile(this._paths.historyFile);
-		if (hist.length === 0) { return 0; }
-		const last = hist[hist.length - 1];
-		return last && typeof last.firedAt === 'number' ? last.firedAt : 0;
+		for (let i = hist.length - 1; i >= 0; i--) {
+			const e: any = hist[i];
+			if (!e || typeof e.firedAt !== 'number') { continue; }
+			if (e.source === 'hook' || e.source === undefined) {
+				return e.firedAt;
+			}
+		}
+		return 0;
 	}
 
 	private async _maybeKickHead(reason: 'auto' | 'manual'): Promise<void> {
@@ -469,14 +511,19 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	}
 
 	private _appendHistory(text: string): void {
-		let entries: Array<{ text: string; firedAt: number }> = [];
+		let entries: Array<{ text: string; firedAt: number; source?: string }> = [];
 		if (fs.existsSync(this._paths.historyFile)) {
 			try {
 				const parsed = JSON.parse(fs.readFileSync(this._paths.historyFile, 'utf8'));
 				if (Array.isArray(parsed)) { entries = parsed; }
 			} catch (_) { /* corrupt → start fresh */ }
 		}
-		entries.push({ text, firedAt: Date.now() });
+		// source:'extension-kick' marks this as our own osascript-driven
+		// kick (we initiated a turn). The watchdog filters these out when
+		// deciding whether to fire again — otherwise an in-flight Claude
+		// turn would look like "hook fired N seconds ago" and the watchdog
+		// would kick again mid-processing.
+		entries.push({ text, firedAt: Date.now(), source: 'extension-kick' });
 		if (entries.length > 50) { entries = entries.slice(-50); }
 		fs.writeFileSync(this._paths.historyFile, JSON.stringify(entries, null, 2));
 	}

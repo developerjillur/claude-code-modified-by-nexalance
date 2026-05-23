@@ -86,7 +86,13 @@ function appendHistory(historyFile, text) {
 			if (Array.isArray(parsed)) { entries = parsed; }
 		} catch (_) { /* corrupt → start fresh */ }
 	}
-	entries.push({ text: text, firedAt: Date.now() });
+	// source:'hook' marks this as a real Claude-Code Stop event (Claude
+	// finished a turn). The extension uses this to distinguish hook fires
+	// from its own watchdog kicks when deciding whether to fire another
+	// watchdog kick. Without this tag, the watchdog couldn't tell that an
+	// extension-side kick was still being processed by Claude and would
+	// fire again 30s later, mid-turn.
+	entries.push({ text: text, firedAt: Date.now(), source: 'hook' });
 	if (entries.length > MAX_HISTORY) { entries = entries.slice(-MAX_HISTORY); }
 	try { atomicWrite(historyFile, JSON.stringify(entries, null, 2)); }
 	catch (err) { process.stderr.write('[claude-mod stop-hook] history write failed: ' + err.message + '\n'); }

@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.14] - 2026-05-23 — Watchdog no longer fires mid-Claude-turn
+
+### Fixed — v0.2.13 watchdog could fire a second kick while Claude was still processing the first
+
+Diagnosed from a live trace: history showed four fires at ~50-60 second intervals (21:01:22, 21:02:12, 21:03:12, 21:04:12). The watchdog interval is 30s; if Claude took longer than that to finish a kicked turn, the watchdog read the EXTENSION'S OWN history entry from the previous kick, saw "last fire was 30s ago", and kicked again — mid-Claude-turn.
+
+The root issue was that the extension's own kick and the Claude Code-driven Stop hook both wrote to `history.json` with no way to tell them apart.
+
+### Fix in v0.2.14 — `source` field on every history entry
+
+- Hook script writes `{text, firedAt, source: 'hook'}` — represents a real Claude turn-ending
+- Extension's own kick writes `{text, firedAt, source: 'extension-kick'}` — represents only that we INITIATED a turn
+
+Watchdog now reads history backwards and picks the **most recent entry whose `source === 'hook'`** as the recency signal. Extension-kick entries are skipped. Backwards-compat: entries without a `source` field (pre-v0.2.14) are treated as `'hook'`.
+
+### Fix — Watchdog now distinguishes two cases properly
+
+- **Case A:** hook fired after our last kick → Claude finished the kicked work. If 30s+ idle since that finish, kick the next item.
+- **Case B:** no hook fire since our last kick → Claude is still processing. Wait until either the hook fires, or `KICK_MAX_WAIT_MS (5 minutes)` passes (recovery from hook breakage).
+
+Effect: watchdog never re-kicks while Claude is mid-turn, but still recovers if the hook goes silent for 5+ minutes.
+
+### Tests
+
+```
+=== v0.2.14 — hook entries tagged source:hook ===
+  ✓ one history entry after hook fire
+  ✓ hook-written history entry has source:hook
+=== v0.2.14 — extension-kick history entries are filtered by watchdog ===
+  ✓ extension emits source:extension-kick on its own kicks
+  ✓ watchdog filters history by source:hook for recency check
+  ✓ extension defines KICK_MAX_WAIT_MS recovery timeout
+  ✓ watchdog distinguishes hook-fired-after-kick from waiting-for-hook
+```
+
 ## [0.2.13] - 2026-05-23 — Periodic watchdog auto-kick (unstucks even when Claude Code stops firing the hook)
 
 ### Diagnosed — Claude Code sometimes stops firing the Stop hook entirely

@@ -193,6 +193,31 @@ try {
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
+	console.log('\n=== v0.2.14 — hook entries tagged source:hook ===');
+	(function () {
+		// Clear the workspace dir + run hook once; verify the resulting
+		// history entry has source: 'hook'.
+		const ws = TEST_WORKSPACE_A;
+		writeQueue(ws, [{ id: 'src-check', text: 'source-tag-test', createdAt: 1 }]);
+		const histFile = wsHistory(ws);
+		if (fs.existsSync(histFile)) { fs.unlinkSync(histFile); }
+		runHook(JSON.stringify({ cwd: ws }));
+		const hist = readHistory(ws) || [];
+		assert(hist.length === 1, 'one history entry after hook fire');
+		assert(hist[0].source === 'hook', 'hook-written history entry has source:hook (was ' + hist[0].source + ')');
+	})();
+
+	console.log('\n=== v0.2.14 — extension-kick history entries are filtered by watchdog ===');
+	(function () {
+		// We don't run the extension here, but we can verify the v0.2.14
+		// compiled extension.js contains the source-filtering logic.
+		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
+		assert(extSrc.indexOf("'extension-kick'") >= 0, 'extension emits source:extension-kick on its own kicks');
+		assert(extSrc.indexOf("e.source === 'hook'") >= 0, 'watchdog filters history by source:hook for recency check');
+		assert(extSrc.indexOf('KICK_MAX_WAIT_MS') >= 0, 'extension defines KICK_MAX_WAIT_MS recovery timeout');
+		assert(extSrc.indexOf('lastHookFireAt > lastKickAt') >= 0, 'watchdog distinguishes hook-fired-after-kick from waiting-for-hook');
+	})();
+
 	console.log('\n=== v0.2.12 — drain continues across stop_hook_active chain ===');
 	// Before v0.2.12 the hook bailed instantly when stop_hook_active=true,
 	// which capped each Stop-chain to exactly one consumed item. Now the
