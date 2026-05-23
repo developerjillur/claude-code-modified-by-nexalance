@@ -58,13 +58,42 @@ export function getWebviewHtml(): string {
 	}
 	.header-spacer { flex: 1; }
 
-	.intro {
-		padding: 14px 16px 6px 16px;
-		color: var(--vscode-descriptionForeground, #999);
+	.chat-area > .status-card:first-child { margin-top: 14px; }
+
+	/* Permission-help inline panel — only visible when nativeStatus is bad */
+	.perm-help {
+		margin: 0 14px 10px 14px;
+		padding: 10px 12px;
+		border-radius: 10px;
+		background: rgba(232,169,81,0.06);
+		border: 1px solid rgba(232,169,81,0.25);
+		color: var(--vscode-foreground, #ddd);
 		font-size: 12px;
-		line-height: 1.55;
 	}
-	.intro b { color: var(--vscode-foreground, #ddd); }
+	.perm-help-title {
+		font-weight: 600;
+		color: #fbbf24;
+		margin-bottom: 6px;
+	}
+	.perm-help-body { line-height: 1.5; }
+	.perm-help-body ol { margin: 6px 0 6px 18px; padding: 0; }
+	.perm-help-body ol li { margin: 3px 0; }
+	.perm-help-body code {
+		background: rgba(255,255,255,0.06);
+		padding: 1px 5px;
+		border-radius: 4px;
+		font-size: 11px;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+	.perm-help-body .perm-cmd {
+		display: block;
+		margin-top: 6px;
+		padding: 5px 8px;
+		background: rgba(0,0,0,0.25);
+		border-radius: 5px;
+		font-size: 11px;
+		user-select: all;
+	}
 
 	.status-card {
 		margin: 0 14px 10px 14px;
@@ -456,15 +485,11 @@ export function getWebviewHtml(): string {
 	<div class="app-header">
 		<span class="app-title">Claude Mod <small>by NexaLance</small></span>
 		<span class="id-pill" title="This is the Claude Mod queue manager. The actual Claude Code chat happens in Anthropic's official extension. This panel only manages the pending queue and feeds prompts via the Stop hook.">
-			<span class="dot"></span>v0.2.8 · Per-workspace
+			<span class="dot"></span>v0.2.9 · Per-workspace
 		</span>
 	</div>
 
 	<div class="chat-area" id="chatArea">
-		<div class="intro">
-			This panel <b>does NOT chat with Claude</b>. It manages a queue of pending prompts that get auto-fed into the active Claude Code session via the Stop hook — each pending prompt is consumed automatically when Claude finishes its current turn (including any clarifying questions).
-		</div>
-
 		<div class="status-card" id="statusCard">
 			<div class="status-row">
 				<span class="label">Stop hook</span>
@@ -489,6 +514,22 @@ export function getWebviewHtml(): string {
 				<button class="probe-btn" onclick="openAccessibilityPrefs()" title="Open System Settings → Privacy & Security → Automation so you can grant VS Code permission to control System Events">
 					Open prefs
 				</button>
+			</div>
+		</div>
+
+		<!-- Permission help — shown only when native submit is failing. -->
+		<div class="perm-help" id="permHelp" style="display:none">
+			<div class="perm-help-title">⚠ Native submit blocked by macOS</div>
+			<div class="perm-help-body">
+				Each fed prompt currently shows under <code>Stop hook feedback:</code> because VS Code can't drive Claude's chat input. To get native user-message look:
+				<ol>
+					<li>Click <b>Open prefs</b> above — System Settings opens to <b>Privacy & Security → Automation</b>.</li>
+					<li>Find <b>Visual Studio Code</b> in the list. If it's not there yet, click <b>Probe native</b> first — that triggers macOS to add it.</li>
+					<li>Expand the Visual Studio Code row and turn on <b>System Events</b>.</li>
+					<li>Come back and click <b>Probe native</b> — the pill above should flip to <code>✓ working</code>.</li>
+				</ol>
+				If the pill still says <code>permission missing</code> after enabling, reset and retry:
+				<code class="perm-cmd">tccutil reset AppleEvents com.microsoft.VSCode</code>
 			</div>
 		</div>
 
@@ -927,8 +968,10 @@ export function getWebviewHtml(): string {
 		}
 		// Native submit pill — tri-state: ok / failing / unknown
 		const nativePill = document.getElementById('nativePill');
+		const permHelp = document.getElementById('permHelp');
 		if (nativePill) {
 			const ns = s.nativeStatus;
+			let needsHelp = false;
 			if (!ns) {
 				nativePill.className = 'status-pill warn';
 				nativePill.textContent = 'unknown — click Probe';
@@ -938,6 +981,10 @@ export function getWebviewHtml(): string {
 			} else {
 				nativePill.className = 'status-pill bad';
 				nativePill.textContent = ns.timedOut ? '✗ permission missing' : '✗ failing';
+				needsHelp = true;
+			}
+			if (permHelp) {
+				permHelp.style.display = needsHelp ? 'block' : 'none';
 			}
 		}
 	}

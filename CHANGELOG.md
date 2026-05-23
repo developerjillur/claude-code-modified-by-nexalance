@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.9] - 2026-05-23 — UI cleanup + inline permission setup help
+
+### Removed — Long intro paragraph above the status card
+
+The "This panel does NOT chat with Claude…" paragraph cluttered the top of the sidebar without adding much practical info after the first read. Removed.
+
+### Added — Inline permission-help panel when native submit is failing
+
+When `nativeStatus.ok === false` the sidebar now shows an amber inline help card with the exact step-by-step:
+
+1. Click **Open prefs** → System Settings opens to Privacy & Security → Automation
+2. Find **Visual Studio Code** in the list (Probe native first if it isn't there — that adds it)
+3. Expand it and turn on **System Events**
+4. Come back and click **Probe native** — pill should flip to ✓ working
+
+Plus a copy-able `tccutil reset AppleEvents com.microsoft.VSCode` command for the case where macOS got into a stuck-denied state and needs to be reset.
+
+The card disappears automatically once the pill flips to ok.
+
 ## [0.2.8] - 2026-05-23 — Per-workspace queues
 
 ### Changed — Queues are now scoped to the project / workspace

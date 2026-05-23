@@ -2,7 +2,7 @@
   "name": "claude-code-modified-by-nexalance",
   "displayName": "Claude Code Modified by NexaLance",
   "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "publisher": "DeveloperJillur",
   "author": "Developer Jillur",
   "repository": {
