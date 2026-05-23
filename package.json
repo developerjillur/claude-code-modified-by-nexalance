@@ -1,0 +1,101 @@
+{
+  "name": "claude-code-modified-by-nexalance",
+  "displayName": "Claude Code Modified by NexaLance",
+  "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
+  "version": "0.2.6",
+  "publisher": "DeveloperJillur",
+  "author": "Developer Jillur",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/developerjillur/claude-code-modified-by-nexalance"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "nexalance",
+    "queue",
+    "codex-style"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:claude-code-modified.queue",
+    "onCommand:claude-code-modified.open",
+    "onCommand:claude-code-modified.installHook",
+    "onCommand:claude-code-modified.uninstallHook"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claude-code-modified.open",
+        "title": "Open Claude Mod queue panel",
+        "category": "Claude Mod"
+      },
+      {
+        "command": "claude-code-modified.installHook",
+        "title": "Install Stop hook into ~/.claude/settings.json",
+        "category": "Claude Mod"
+      },
+      {
+        "command": "claude-code-modified.uninstallHook",
+        "title": "Uninstall Stop hook from ~/.claude/settings.json",
+        "category": "Claude Mod"
+      },
+      {
+        "command": "claude-code-modified.fireNow",
+        "title": "Fire the next pending prompt into Claude Code now",
+        "category": "Claude Mod"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-code-modified",
+          "title": "Claude Mod (by NexaLance)",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-code-modified": [
+        {
+          "id": "claude-code-modified.queue",
+          "name": "Claude Mod queue",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Code Modified",
+      "properties": {
+        "claudeCodeModified.autoOpenOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open the Claude Mod sidebar every time VS Code starts, so you never have to hunt for the icon. Turn off if you find it intrusive."
+        },
+        "claudeCodeModified.autoKickWhenIdle": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reserved. v0.2.4 auto-kicked on every queue add, which led to runaway kicks when Claude was already processing. As of v0.2.5 only the manual ▶ Fire now button and the Stop hook drain the queue. This setting is kept off and reserved for a future implementation that can reliably detect whether Claude is mid-turn."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.94.0",
+    "typescript": "^5.4.0"
+  }
+}
