@@ -253,6 +253,26 @@ try {
 		if (failed > 0) { break; }
 	}
 
+	console.log('\n=== Auto-kick safeguard surface (v0.2.10) ===');
+	(function () {
+		// We can't easily exercise the QueueProvider class here (it requires
+		// the vscode module). But we can statically verify the compiled
+		// extension.js wires up the four guards described in the changelog:
+		// in-flight mutex, cooldown, hook-recent threshold, and the setting.
+		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
+		assert(extSrc.indexOf('_kickInFlight') >= 0, 'extension.js declares _kickInFlight mutex');
+		assert(extSrc.indexOf('_lastAutoKickAt') >= 0, 'extension.js tracks _lastAutoKickAt for cooldown');
+		assert(extSrc.indexOf('AUTO_KICK_COOLDOWN_MS') >= 0, 'extension.js defines AUTO_KICK_COOLDOWN_MS constant');
+		assert(extSrc.indexOf('HOOK_RECENT_THRESHOLD_MS') >= 0, 'extension.js defines HOOK_RECENT_THRESHOLD_MS constant');
+		assert(extSrc.indexOf('autoKickWhenIdle') >= 0, 'extension.js reads autoKickWhenIdle setting');
+		assert(extSrc.indexOf('previousQueue.length === 0') >= 0, 'auto-kick only on empty → non-empty transition');
+		assert(extSrc.indexOf('_maybeAutoKick') >= 0, 'extension.js has _maybeAutoKick gate method');
+		// And the setting is registered as enabled by default
+		const pkg = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'package.json'), 'utf8'));
+		const setting = pkg.contributes.configuration.properties['claudeCodeModified.autoKickWhenIdle'];
+		assert(setting && setting.default === true, 'autoKickWhenIdle default = true (auto-kick on by default)');
+	})();
+
 	console.log('\n=== Attachment helpers ===');
 	const ad = setup.getAttachmentsDir();
 	assert(typeof ad === 'string' && fs.existsSync(ad), 'attachments dir exists');

@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.10] - 2026-05-23 — Auto-kick is back (with v0.2.4's "kick storm" bug fixed)
+
+### Diagnosed — pending items sat forever when Claude was already idle
+
+Since v0.2.5 the queue only drained via two paths: the Stop hook (when Claude finishes a turn) and the manual ▶ Fire now button. Neither fires when Claude is already idle waiting for input. So if you added 7 prompts to a queue while Claude was sitting at "Tell me when to proceed", nothing happened until you clicked Fire now — and the user kept asking why their pending items weren't going through.
+
+### Fixed — Safer auto-kick reintroduced
+
+The auto-kick gate now checks **four** things before firing (v0.2.4 only checked the queue transition, which was why it kept storming):
+
+1. `claudeCodeModified.autoKickWhenIdle` is `true` (default — flip off if you don't want any auto-firing)
+2. No other kick is currently in flight (`_kickInFlight` mutex, same as Fire-now)
+3. Last auto-kick was more than **60 seconds** ago (`AUTO_KICK_COOLDOWN_MS`)
+4. Stop hook hasn't fired in the last **30 seconds** (`HOOK_RECENT_THRESHOLD_MS`) — if it has, Claude is mid-flow and the hook is already draining the queue, no need to inject
+
+The 60s cooldown is the key safeguard. Even if the user rapid-adds 10 prompts (each one technically a 0→1 transition after the previous kick consumes the head), only the first one auto-kicks. The other 9 just queue, and the hook drains them as Claude finishes each subsequent turn.
+
+### Two trigger sites
+
+- **On `saveQueue` from the webview** — typing a prompt into an empty queue fires the head if Claude looks idle.
+- **On webview resolve (sidebar open)** — if there are pending items already in the queue when you open VS Code (or switch workspaces) AND Claude is idle, the head fires automatically. Same safeguards apply.
+
+### Setting
+
+`claudeCodeModified.autoKickWhenIdle` (default `true`) controls both trigger sites.
+
 ## [0.2.9] - 2026-05-23 — UI cleanup + inline permission setup help
 
 ### Removed — Long intro paragraph above the status card

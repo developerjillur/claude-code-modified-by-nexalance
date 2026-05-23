@@ -2,7 +2,7 @@
   "name": "claude-code-modified-by-nexalance",
   "displayName": "Claude Code Modified by NexaLance",
   "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "publisher": "DeveloperJillur",
   "author": "Developer Jillur",
   "repository": {
@@ -93,8 +93,8 @@
         },
         "claudeCodeModified.autoKickWhenIdle": {
           "type": "boolean",
-          "default": false,
-          "description": "Reserved. v0.2.4 auto-kicked on every queue add, which led to runaway kicks when Claude was already processing. As of v0.2.5 only the manual ▶ Fire now button and the Stop hook drain the queue. This setting is kept off and reserved for a future implementation that can reliably detect whether Claude is mid-turn."
+          "default": true,
+          "description": "When you add a prompt to an empty queue (or open VS Code with pending items already there) AND no Stop-hook fire has happened in the last 30 seconds (Claude appears idle), push the head item into Claude's chat automatically via osascript. Subsequent items drain via the Stop hook in the normal way. Cooldown of 60s prevents the v0.2.4 'kick storm' issue. Turn off if you prefer to drive the queue exclusively via Fire-now clicks + Stop hook."
         }
       }
     }

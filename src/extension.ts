@@ -148,7 +148,12 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	private _watchers: Array<{ close: () => void }> = [];
 	private _kickInFlight = false;
+	private _lastAutoKickAt = 0;
 	private _paths: WorkspacePaths = currentPaths();
+
+	// Debounce / safety thresholds for auto-kick.
+	private static AUTO_KICK_COOLDOWN_MS = 60_000;       // don't auto-kick more than once per minute
+	private static HOOK_RECENT_THRESHOLD_MS = 30_000;    // hook fired in last 30s ⇒ Claude is active, leave it alone
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -160,16 +165,37 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		this.pushQueueFromDisk();
 		this.pushHistoryFromDisk();
 		this.refreshStatus();
+		// If we open with pending items already in the queue (e.g. the user
+		// added prompts in a previous session while Claude was idle, then
+		// reloaded VS Code), give them a kick now so the work continues.
+		// Same idle/cooldown safeguards as a runtime add.
+		setTimeout(() => {
+			const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
+			if (cfg.get<boolean>('autoKickWhenIdle', true)
+				&& loadQueueFromFile(this._paths.queueFile).length > 0) {
+				this._maybeAutoKick();
+			}
+		}, 1500);
 	}
 
 	private _handleMessage(msg: any) {
 		switch (msg.type) {
 			case 'saveQueue':
 				if (Array.isArray(msg.data)) {
+					const previousQueue = loadQueueFromFile(this._paths.queueFile);
 					try {
 						saveQueueToFile(this._paths.queueFile, msg.data);
 					} catch (err: any) {
 						this._post({ type: 'note', data: 'Could not save queue: ' + err.message });
+					}
+					// Auto-kick reborn (safer than v0.2.4): only fire when the
+					// queue transitions from empty → non-empty AND the user's
+					// session looks idle (no recent hook fire, no recent kick).
+					const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
+					if (cfg.get<boolean>('autoKickWhenIdle', true)
+						&& previousQueue.length === 0
+						&& msg.data.length > 0) {
+						this._maybeAutoKick();
 					}
 				}
 				return;
@@ -302,6 +328,39 @@ class QueueProvider implements vscode.WebviewViewProvider {
 
 	public async firePendingNow(): Promise<void> {
 		await this._maybeKickHead('manual');
+	}
+
+	/**
+	 * Auto-kick gate. Returns immediately unless all of the following hold:
+	 *
+	 *   - claudeCodeModified.autoKickWhenIdle is true (default)
+	 *   - no other kick is currently in flight
+	 *   - we haven't auto-kicked in the last AUTO_KICK_COOLDOWN_MS
+	 *   - the Stop hook hasn't fired in the last HOOK_RECENT_THRESHOLD_MS
+	 *     (recent hook activity ⇒ Claude is mid-flow, the hook is already
+	 *     draining the queue, no need for us to inject)
+	 *
+	 * The cooldown is the key safety: v0.2.4 didn't have one, so rapid
+	 * sequential prompt-adds (each transitioning 0→1 after the previous
+	 * kick drained the head) produced a barrage of kicks at a Claude that
+	 * was still processing the previous one.
+	 */
+	public _maybeAutoKick(): void {
+		if (this._kickInFlight) { return; }
+		const now = Date.now();
+		if (now - this._lastAutoKickAt < QueueProvider.AUTO_KICK_COOLDOWN_MS) { return; }
+		const lastHookFireAt = this._lastHookFireAt();
+		if (now - lastHookFireAt < QueueProvider.HOOK_RECENT_THRESHOLD_MS) { return; }
+		// All clear — fire it.
+		this._lastAutoKickAt = now;
+		this._maybeKickHead('auto');
+	}
+
+	private _lastHookFireAt(): number {
+		const hist = loadHistoryFromFile(this._paths.historyFile);
+		if (hist.length === 0) { return 0; }
+		const last = hist[hist.length - 1];
+		return last && typeof last.firedAt === 'number' ? last.firedAt : 0;
 	}
 
 	private async _maybeKickHead(reason: 'auto' | 'manual'): Promise<void> {
