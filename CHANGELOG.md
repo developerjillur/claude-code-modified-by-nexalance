@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.2.15] - 2026-05-24 — Native busy-tracking via UserPromptSubmit hook
+
+### The real fix you asked for
+
+Every previous version inferred "Claude is idle" from Stop-event history alone, which is imprecise — the gap between a user submitting a prompt and Claude finishing it is invisible to a Stop-only signal. v0.2.15 uses Claude Code's **UserPromptSubmit hook** — the native event that fires the instant a user prompt is submitted — to track the busy state explicitly.
+
+### How it works
+
+Two hooks now installed into `~/.claude/settings.json`:
+
+| Hook | Records | Marker file |
+|---|---|---|
+| `UserPromptSubmit` (new) | When a user prompt is submitted (real user OR our osascript kick typing) | `~/.claude/claude-mod-queues/<ws>/user-submit.json` |
+| `Stop` (existing) | When Claude finishes a turn | `~/.claude/claude-mod-queues/<ws>/history.json` |
+
+Watchdog decision is now binary:
+
+```
+LASTSUB > LASTSTOP  →  Claude is currently processing a prompt   →  NEVER kick
+LASTSTOP > LASTSUB  →  Claude finished; if 30s+ idle, kick the next item
+```
+
+The window between user submission and Claude's stop — where v0.2.13 and v0.2.14 could fire a second kick mid-turn — is now closed by a hook event Claude Code emits the moment a prompt enters Claude's chat.
+
+### Recovery & first-fire
+
+- **First fire (no signals yet, no prior activity):** kick immediately if queue has items
+- **Recovery (we kicked but neither LASTSUB nor LASTSTOP has updated in 5 minutes):** assume something is stuck and re-kick
+
+### What the user sees
+
+The status payload sent to the webview now includes `claudeBusy: boolean` — a precise indicator of whether Claude is mid-turn right now. (Surfacing it visually is left for a future polish pass.)
+
+### Installation
+
+`Install hook` now installs both hooks atomically. `Uninstall hook` removes both. Existing installations from older versions get upgraded automatically on next activate via the same migration that already kept the stable-hook path fresh — both scripts are refreshed in `~/.claude/`.
+
+### Tests
+
+```
+=== v0.2.15 — UserPromptSubmit hook + precise busy/idle ===
+  ✓ user-prompt-submit-hook.js bundled with extension
+  ✓ user-submit hook exits 0
+  ✓ user-submit hook writes only {} to stdout (does not modify the prompt)
+  ✓ user-submit marker file was written
+  ✓ marker has numeric submittedAt
+  ✓ marker recorded promptLength=5 (no text)
+  ✓ Stop hook installed
+  ✓ UserPromptSubmit hook installed
+  ✓ Stop hook removed on uninstall
+  ✓ UserPromptSubmit hook removed on uninstall
+  ✓ extension reads last user-submit timestamp
+  ✓ watchdog skips when Claude is busy (LASTSUB > LASTSTOP)
+  ✓ status payload exposes claudeBusy to the webview
+```
+
 ## [0.2.14] - 2026-05-23 — Watchdog no longer fires mid-Claude-turn
 
 ### Fixed — v0.2.13 watchdog could fire a second kick while Claude was still processing the first

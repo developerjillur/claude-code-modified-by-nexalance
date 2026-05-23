@@ -12,7 +12,9 @@ import {
 	saveQueueToFile,
 	loadHistoryFromFile,
 	loadNativeStatus,
+	loadUserSubmitMarker,
 	refreshStableHookScript,
+	refreshStableUserSubmitHookScript,
 	saveBase64Image,
 	getAttachmentsDir,
 	migrateLegacyGlobalQueue,
@@ -33,8 +35,9 @@ function currentPaths(): WorkspacePaths {
 export function activate(context: vscode.ExtensionContext) {
 	try {
 		refreshStableHookScript(context.extensionPath);
+		refreshStableUserSubmitHookScript(context.extensionPath);
 	} catch (err: any) {
-		console.warn('[claude-mod] could not refresh hook script:', err.message);
+		console.warn('[claude-mod] could not refresh hook scripts:', err.message);
 	}
 
 	// Per-workspace migration: v0.2.7 stored a single global queue at
@@ -292,6 +295,8 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	}
 
 	public refreshStatus(): void {
+		const lastSubAt = this._lastUserSubmitAt();
+		const lastStopAt = this._lastHookFireAt();
 		this._post({
 			type: 'status',
 			data: {
@@ -302,7 +307,10 @@ class QueueProvider implements vscode.WebviewViewProvider {
 				settingsFile: this._paths.settingsFile,
 				workspacePath: this._paths.workspacePath,
 				hookInstalled: isHookInstalled(),
-				nativeStatus: loadNativeStatus(this._paths.nativeStatusFile)
+				nativeStatus: loadNativeStatus(this._paths.nativeStatusFile),
+				lastUserSubmitAt: lastSubAt,
+				lastStopAt: lastStopAt,
+				claudeBusy: lastSubAt > lastStopAt
 			}
 		});
 	}
@@ -362,40 +370,67 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	 * kick drained the head) produced a barrage of kicks at a Claude that
 	 * was still processing the previous one.
 	 */
+	/**
+	 * The watchdog gate. v0.2.15: uses the **UserPromptSubmit hook** as the
+	 * precise "Claude is busy" signal, instead of inferring from history.
+	 *
+	 *   LASTSUB  = timestamp of the most recent UserPromptSubmit event
+	 *              (recorded by our user-prompt-submit-hook.js)
+	 *   LASTSTOP = timestamp of the most recent Stop event with source 'hook'
+	 *              (recorded by our stop-hook.js)
+	 *
+	 * Decision tree:
+	 *
+	 *   • LASTSUB > LASTSTOP                  → Claude is currently
+	 *                                            processing the latest user
+	 *                                            prompt — DO NOT kick.
+	 *   • LASTSTOP > LASTSUB                  → Claude finished its last
+	 *                                            turn. If it's been
+	 *                                            ≥HOOK_RECENT_THRESHOLD_MS,
+	 *                                            kick the next item.
+	 *   • Both zero, queue has items          → first ever kick, fire.
+	 *
+	 * Recovery: if we kicked but neither LASTSUB nor LASTSTOP has changed
+	 * in KICK_MAX_WAIT_MS (5 min), assume something is stuck and re-kick.
+	 */
 	public _maybeAutoKick(): void {
 		if (this._kickInFlight) { return; }
 		const now = Date.now();
-		const lastHookFireAt = this._lastHookFireAt();
+		const lastSubAt = this._lastUserSubmitAt();
+		const lastStopAt = this._lastHookFireAt();
 		const lastKickAt = this._lastAutoKickAt;
 
-		// CASE A: hook fired AFTER our last extension kick → Claude finished
-		// the kicked item (and possibly more via hook chain). If Claude has
-		// been idle for HOOK_RECENT_THRESHOLD_MS since that finish, kick the
-		// next item.
-		if (lastHookFireAt > lastKickAt) {
-			if (now - lastHookFireAt >= QueueProvider.HOOK_RECENT_THRESHOLD_MS) {
+		// CASE 1: Claude is currently busy (a prompt was submitted, no Stop
+		// yet) — never kick mid-turn.
+		if (lastSubAt > lastStopAt) {
+			// Recovery: if we kicked long ago and nothing has progressed,
+			// try again.
+			if (lastKickAt > 0 && now - lastKickAt >= QueueProvider.KICK_MAX_WAIT_MS) {
 				this._lastAutoKickAt = now;
 				this._maybeKickHead('auto');
 			}
 			return;
 		}
 
-		// CASE B: hook hasn't fired since our last kick. Claude might still
-		// be processing the kicked item (most common) — wait. But if we've
-		// been waiting longer than KICK_MAX_WAIT_MS, something is wrong
-		// (hook is broken, Claude crashed, etc.) and we should re-kick.
-		if (lastKickAt === 0) {
-			// Never kicked yet — fire right away.
-			this._lastAutoKickAt = now;
-			this._maybeKickHead('auto');
+		// CASE 2: Claude finished its last turn (Stop came after the latest
+		// user submit). Only kick once it's been idle for the threshold.
+		if (lastStopAt > 0) {
+			if (now - lastStopAt >= QueueProvider.HOOK_RECENT_THRESHOLD_MS) {
+				this._lastAutoKickAt = now;
+				this._maybeKickHead('auto');
+			}
 			return;
 		}
-		if (now - lastKickAt >= QueueProvider.KICK_MAX_WAIT_MS) {
-			// Waited long enough — re-kick.
-			this._lastAutoKickAt = now;
-			this._maybeKickHead('auto');
-		}
-		// Else: still waiting for Claude / hook to respond to our last kick.
+
+		// CASE 3: never observed either signal (fresh install, no Claude
+		// activity yet, hooks just installed). Fire to get things started.
+		this._lastAutoKickAt = now;
+		this._maybeKickHead('auto');
+	}
+
+	private _lastUserSubmitAt(): number {
+		const marker = loadUserSubmitMarker(this._paths.userSubmitFile);
+		return marker && typeof marker.submittedAt === 'number' ? marker.submittedAt : 0;
 	}
 
 	/**
@@ -534,6 +569,7 @@ class QueueProvider implements vscode.WebviewViewProvider {
 			[this._paths.historyFile, () => this.pushHistoryFromDisk()],
 			[this._paths.settingsFile, () => this.refreshStatus()],
 			[this._paths.nativeStatusFile, () => this.refreshStatus()],
+			[this._paths.userSubmitFile, () => this.refreshStatus()],
 		];
 		for (const [file, onChange] of targets) {
 			fs.watchFile(file, { interval: 800 }, () => onChange());

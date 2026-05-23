@@ -193,6 +193,52 @@ try {
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
+	console.log('\n=== v0.2.15 — UserPromptSubmit hook + precise busy/idle ===');
+	(function () {
+		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
+		const ws = path.join(os.tmpdir(), 'claude-mod-busy-' + Date.now());
+		fs.mkdirSync(ws, { recursive: true });
+		const p = setup.getPathsForWorkspace(ws);
+
+		// (1) Run the bundled user-prompt-submit-hook with a fake event and
+		//     verify it writes the user-submit marker.
+		const submitHookSrc = path.join(EXT_ROOT, 'assets/user-prompt-submit-hook.js');
+		assert(fs.existsSync(submitHookSrc), 'user-prompt-submit-hook.js bundled with extension');
+		const r = cp.spawnSync('node', [submitHookSrc], {
+			input: JSON.stringify({ cwd: ws, prompt: 'hello' }),
+			encoding: 'utf8',
+			timeout: 5000
+		});
+		assert(r.status === 0, 'user-submit hook exits 0');
+		assert(r.stdout.trim() === '{}', 'user-submit hook writes only {} to stdout (does not modify the prompt)');
+		const marker = setup.loadUserSubmitMarker(p.userSubmitFile);
+		assert(marker !== null, 'user-submit marker file was written');
+		assert(typeof marker.submittedAt === 'number', 'marker has numeric submittedAt');
+		assert(marker.promptLength === 5, 'marker recorded promptLength=5 (no text)');
+
+		// (2) installHook now installs BOTH hooks.
+		setup.uninstallHook();
+		setup.installHook(EXT_ROOT);
+		const settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+		const stopHooksStr = JSON.stringify(settings.hooks.Stop);
+		const submitHooksStr = JSON.stringify(settings.hooks.UserPromptSubmit || []);
+		assert(stopHooksStr.indexOf('claude-mod-stop-hook') >= 0, 'Stop hook installed');
+		assert(submitHooksStr.indexOf('claude-mod-user-submit-hook') >= 0, 'UserPromptSubmit hook installed');
+
+		// (3) Uninstall removes BOTH.
+		setup.uninstallHook();
+		const s2 = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+		assert(!JSON.stringify(s2.hooks.Stop || []).includes('claude-mod-stop-hook'), 'Stop hook removed on uninstall');
+		assert(!JSON.stringify(s2.hooks.UserPromptSubmit || []).includes('claude-mod-user-submit-hook'), 'UserPromptSubmit hook removed on uninstall');
+
+		// (4) Watchdog logic — verify the compiled extension reads BOTH
+		//     signals and prefers UserPromptSubmit as the busy indicator.
+		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
+		assert(extSrc.indexOf('_lastUserSubmitAt') >= 0, 'extension reads last user-submit timestamp');
+		assert(extSrc.indexOf('lastSubAt > lastStopAt') >= 0, 'watchdog skips when Claude is busy (LASTSUB > LASTSTOP)');
+		assert(extSrc.indexOf('claudeBusy') >= 0, 'status payload exposes claudeBusy to the webview');
+	})();
+
 	console.log('\n=== v0.2.14 — hook entries tagged source:hook ===');
 	(function () {
 		// Clear the workspace dir + run hook once; verify the resulting
@@ -215,7 +261,11 @@ try {
 		assert(extSrc.indexOf("'extension-kick'") >= 0, 'extension emits source:extension-kick on its own kicks');
 		assert(extSrc.indexOf("e.source === 'hook'") >= 0, 'watchdog filters history by source:hook for recency check');
 		assert(extSrc.indexOf('KICK_MAX_WAIT_MS') >= 0, 'extension defines KICK_MAX_WAIT_MS recovery timeout');
-		assert(extSrc.indexOf('lastHookFireAt > lastKickAt') >= 0, 'watchdog distinguishes hook-fired-after-kick from waiting-for-hook');
+		// v0.2.15 superseded the lastHookFireAt > lastKickAt comparison —
+		// the watchdog now uses UserPromptSubmit timestamps as the primary
+		// "Claude is busy" signal instead of comparing hook fires to our
+		// own kicks. The corresponding v0.2.15 assertions live below.
+		assert(extSrc.indexOf('lastSubAt > lastStopAt') >= 0 || extSrc.indexOf('lastHookFireAt > lastKickAt') >= 0, 'watchdog has a busy-vs-idle decision');
 	})();
 
 	console.log('\n=== v0.2.12 — drain continues across stop_hook_active chain ===');

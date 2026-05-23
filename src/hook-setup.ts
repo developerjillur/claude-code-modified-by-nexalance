@@ -4,10 +4,12 @@ import * as os from 'os';
 import * as path from 'path';
 
 const HOOK_MARKER = 'claude-mod-stop-hook';
+const USER_SUBMIT_HOOK_MARKER = 'claude-mod-user-submit-hook';
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'settings.json');
 const WORKSPACES_ROOT = path.join(CLAUDE_DIR, 'claude-mod-queues');
 const STABLE_HOOK_PATH = path.join(CLAUDE_DIR, 'claude-mod-hook.js');
+const STABLE_USER_SUBMIT_HOOK_PATH = path.join(CLAUDE_DIR, 'claude-mod-user-submit-hook.js');
 const ATTACHMENTS_DIR = path.join(CLAUDE_DIR, 'claude-mod-attachments');
 
 // Legacy v0.2.7 paths — the old global queue/history files. v0.2.8 migrates
@@ -26,7 +28,9 @@ export interface WorkspacePaths {
 	queueFile: string;
 	historyFile: string;
 	nativeStatusFile: string;
+	userSubmitFile: string;
 	hookScript: string;
+	userSubmitHookScript: string;
 	settingsFile: string;
 	attachmentsDir: string;
 }
@@ -87,7 +91,9 @@ export function getPathsForWorkspace(workspacePath: string): WorkspacePaths {
 		queueFile: path.join(dir, 'queue.json'),
 		historyFile: path.join(dir, 'history.json'),
 		nativeStatusFile: path.join(dir, 'native-status.json'),
+		userSubmitFile: path.join(dir, 'user-submit.json'),
 		hookScript: STABLE_HOOK_PATH,
+		userSubmitHookScript: STABLE_USER_SUBMIT_HOOK_PATH,
 		settingsFile: SETTINGS_FILE,
 		attachmentsDir: ATTACHMENTS_DIR
 	};
@@ -183,6 +189,34 @@ export function refreshStableHookScript(extensionPath: string): boolean {
 	return true;
 }
 
+export function refreshStableUserSubmitHookScript(extensionPath: string): boolean {
+	const src = path.join(extensionPath, 'assets', 'user-prompt-submit-hook.js');
+	if (!fs.existsSync(src)) { throw new Error('Bundled user-submit hook script missing at ' + src); }
+	if (!fs.existsSync(CLAUDE_DIR)) { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); }
+	const newContents = fs.readFileSync(src, 'utf8');
+	let existing = '';
+	try {
+		if (fs.existsSync(STABLE_USER_SUBMIT_HOOK_PATH)) {
+			existing = fs.readFileSync(STABLE_USER_SUBMIT_HOOK_PATH, 'utf8');
+		}
+	} catch (_) { /* fall through */ }
+	if (existing === newContents) { return false; }
+	atomicWriteFile(STABLE_USER_SUBMIT_HOOK_PATH, newContents);
+	try { fs.chmodSync(STABLE_USER_SUBMIT_HOOK_PATH, 0o755); } catch (_) { /* non-fatal */ }
+	return true;
+}
+
+export interface UserSubmitMarker { submittedAt: number; promptLength?: number; }
+
+export function loadUserSubmitMarker(userSubmitFile: string): UserSubmitMarker | null {
+	if (!fs.existsSync(userSubmitFile)) { return null; }
+	try {
+		const parsed = JSON.parse(fs.readFileSync(userSubmitFile, 'utf8'));
+		if (parsed && typeof parsed.submittedAt === 'number') { return parsed as UserSubmitMarker; }
+	} catch (_) { /* fall through */ }
+	return null;
+}
+
 export function isHookInstalled(): boolean {
 	const settings = readSettings();
 	const stopHooks = settings?.hooks?.Stop;
@@ -192,30 +226,51 @@ export function isHookInstalled(): boolean {
 
 export function installHook(extensionPath: string): { installed: boolean; settingsFile: string; hookScript: string } {
 	refreshStableHookScript(extensionPath);
+	refreshStableUserSubmitHookScript(extensionPath);
 	const settings = readSettings();
 	if (!settings.hooks) { settings.hooks = {}; }
 	if (!Array.isArray(settings.hooks.Stop)) { settings.hooks.Stop = []; }
+	if (!Array.isArray(settings.hooks.UserPromptSubmit)) { settings.hooks.UserPromptSubmit = []; }
+
+	// Idempotent: strip prior versions of our hooks.
 	settings.hooks.Stop = settings.hooks.Stop.filter(
 		(h: any) => !JSON.stringify(h).includes(HOOK_MARKER)
 	);
-	const command = `/usr/bin/env node "${STABLE_HOOK_PATH}" # ${HOOK_MARKER}`;
+	settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+		(h: any) => !JSON.stringify(h).includes(USER_SUBMIT_HOOK_MARKER)
+	);
+
 	settings.hooks.Stop.push({
 		matcher: '',
-		hooks: [{ type: 'command', command }]
+		hooks: [{ type: 'command', command: `/usr/bin/env node "${STABLE_HOOK_PATH}" # ${HOOK_MARKER}` }]
 	});
+	settings.hooks.UserPromptSubmit.push({
+		matcher: '',
+		hooks: [{ type: 'command', command: `/usr/bin/env node "${STABLE_USER_SUBMIT_HOOK_PATH}" # ${USER_SUBMIT_HOOK_MARKER}` }]
+	});
+
 	writeSettings(settings);
 	return { installed: true, settingsFile: SETTINGS_FILE, hookScript: STABLE_HOOK_PATH };
 }
 
 export function uninstallHook(): { uninstalled: boolean } {
 	const settings = readSettings();
-	if (!Array.isArray(settings?.hooks?.Stop)) { return { uninstalled: false }; }
-	const before = settings.hooks.Stop.length;
-	settings.hooks.Stop = settings.hooks.Stop.filter(
-		(h: any) => !JSON.stringify(h).includes(HOOK_MARKER)
-	);
-	const removed = settings.hooks.Stop.length !== before;
-	writeSettings(settings);
+	let removed = false;
+	if (Array.isArray(settings?.hooks?.Stop)) {
+		const before = settings.hooks.Stop.length;
+		settings.hooks.Stop = settings.hooks.Stop.filter(
+			(h: any) => !JSON.stringify(h).includes(HOOK_MARKER)
+		);
+		if (settings.hooks.Stop.length !== before) { removed = true; }
+	}
+	if (Array.isArray(settings?.hooks?.UserPromptSubmit)) {
+		const before = settings.hooks.UserPromptSubmit.length;
+		settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+			(h: any) => !JSON.stringify(h).includes(USER_SUBMIT_HOOK_MARKER)
+		);
+		if (settings.hooks.UserPromptSubmit.length !== before) { removed = true; }
+	}
+	if (removed) { writeSettings(settings); }
 	return { uninstalled: removed };
 }
 
