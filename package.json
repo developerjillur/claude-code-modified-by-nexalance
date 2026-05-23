@@ -2,7 +2,7 @@
   "name": "claude-code-modified-by-nexalance",
   "displayName": "Claude Code Modified by NexaLance",
   "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "publisher": "DeveloperJillur",
   "author": "Developer Jillur",
   "repository": {
@@ -52,6 +52,16 @@
       {
         "command": "claude-code-modified.fireNow",
         "title": "Fire the next pending prompt into Claude Code now",
+        "category": "Claude Mod"
+      },
+      {
+        "command": "claude-code-modified.probeAccessibility",
+        "title": "Probe macOS Accessibility (test or trigger the permission prompt)",
+        "category": "Claude Mod"
+      },
+      {
+        "command": "claude-code-modified.openAccessibilityPrefs",
+        "title": "Open System Settings → Privacy & Security → Automation",
         "category": "Claude Mod"
       }
     ],

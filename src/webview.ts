@@ -107,6 +107,17 @@ export function getWebviewHtml(): string {
 	}
 	.setup-btn:hover { background: linear-gradient(135deg, #34d399 0%, #10b981 100%); }
 	.setup-btn.removing { background: rgba(255,255,255,0.08); color: #f87171; }
+	.probe-btn {
+		background: transparent;
+		color: var(--vscode-descriptionForeground, #999);
+		border: 1px solid rgba(255,255,255,0.1);
+		padding: 6px 11px;
+		border-radius: 7px;
+		cursor: pointer;
+		font-size: 11.5px;
+	}
+	.probe-btn:hover { background: rgba(255,255,255,0.06); color: var(--vscode-foreground, #ddd); }
+	.status-pill.warn { background: rgba(232,169,81,0.10); color: #fbbf24; border: 1px solid rgba(232,169,81,0.30); }
 
 	.chat-area {
 		flex: 1;
@@ -445,7 +456,7 @@ export function getWebviewHtml(): string {
 	<div class="app-header">
 		<span class="app-title">Claude Mod <small>by NexaLance</small></span>
 		<span class="id-pill" title="This is the Claude Mod queue manager. The actual Claude Code chat happens in Anthropic's official extension. This panel only manages the pending queue and feeds prompts via the Stop hook.">
-			<span class="dot"></span>v0.2.6 · Native submit
+			<span class="dot"></span>v0.2.7 · Native submit
 		</span>
 	</div>
 
@@ -460,13 +471,25 @@ export function getWebviewHtml(): string {
 				<span class="status-pill bad" id="hookPill">checking…</span>
 			</div>
 			<div class="status-row">
+				<span class="label">Native submit</span>
+				<span class="status-pill bad" id="nativePill" title="Whether osascript can drive Anthropic's chat — requires macOS Accessibility / Automation permission for VS Code">unknown</span>
+			</div>
+			<div class="status-row">
 				<span class="label">Queue file</span>
 				<span class="value" id="queueFileLabel">—</span>
 			</div>
-			<button class="setup-btn" id="setupBtn" onclick="onSetupClick()">
-				<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-				<span id="setupBtnLabel">Install hook</span>
-			</button>
+			<div class="status-row" style="gap: 6px;">
+				<button class="setup-btn" id="setupBtn" onclick="onSetupClick()">
+					<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+					<span id="setupBtnLabel">Install hook</span>
+				</button>
+				<button class="probe-btn" onclick="probeAccessibility()" title="Run a tiny osascript probe to check (or trigger) the Accessibility permission for VS Code">
+					Probe native
+				</button>
+				<button class="probe-btn" onclick="openAccessibilityPrefs()" title="Open System Settings → Privacy & Security → Automation so you can grant VS Code permission to control System Events">
+					Open prefs
+				</button>
+			</div>
 		</div>
 
 		<div class="queue-panel" id="queuePanel">
@@ -877,6 +900,14 @@ export function getWebviewHtml(): string {
 		}
 	}
 
+	function probeAccessibility() {
+		vscode.postMessage({ type: 'probeAccessibility' });
+	}
+
+	function openAccessibilityPrefs() {
+		vscode.postMessage({ type: 'openAccessibilityPrefs' });
+	}
+
 	function updateStatus(s) {
 		hookInstalled = !!s.hookInstalled;
 		if (hookInstalled) {
@@ -893,6 +924,21 @@ export function getWebviewHtml(): string {
 		if (s.queueFile) {
 			queueFileLabel.textContent = shortPath(s.queueFile);
 			queuePathInline.textContent = shortPath(s.queueFile);
+		}
+		// Native submit pill — tri-state: ok / failing / unknown
+		const nativePill = document.getElementById('nativePill');
+		if (nativePill) {
+			const ns = s.nativeStatus;
+			if (!ns) {
+				nativePill.className = 'status-pill warn';
+				nativePill.textContent = 'unknown — click Probe';
+			} else if (ns.ok) {
+				nativePill.className = 'status-pill ok';
+				nativePill.textContent = '✓ working';
+			} else {
+				nativePill.className = 'status-pill bad';
+				nativePill.textContent = ns.timedOut ? '✗ permission missing' : '✗ failing';
+			}
 		}
 	}
 
@@ -959,6 +1005,8 @@ export function getWebviewHtml(): string {
 	window.pickFiles = pickFiles;
 	window.removeAttachment = removeAttachment;
 	window.fireNow = fireNow;
+	window.probeAccessibility = probeAccessibility;
+	window.openAccessibilityPrefs = openAccessibilityPrefs;
 
 	window.addEventListener('message', (e) => {
 		const msg = e.data;

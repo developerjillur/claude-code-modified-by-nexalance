@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { getWebviewHtml } from './webview';
+import * as cp from 'child_process';
 import {
 	getPaths,
 	installHook,
@@ -11,7 +12,8 @@ import {
 	loadHistoryFromFile,
 	refreshStableHookScript,
 	saveBase64Image,
-	getAttachmentsDir
+	getAttachmentsDir,
+	loadNativeStatus
 } from './hook-setup';
 import { kickClaudeCodeChat } from './auto-kick';
 
@@ -90,6 +92,21 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('claude-code-modified.fireNow', async () => {
 			await provider.firePendingNow();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('claude-code-modified.openAccessibilityPrefs', async () => {
+			// Open the macOS Privacy → Automation pane so the user can grant
+			// VS Code permission to control System Events. The url-scheme
+			// `x-apple.systempreferences:` is the documented way to deep-link.
+			await vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('claude-code-modified.probeAccessibility', async () => {
+			await provider.probeAccessibility();
 		})
 	);
 
@@ -174,6 +191,12 @@ class QueueProvider implements vscode.WebviewViewProvider {
 				this.refreshStatus();
 				this.pushHistoryFromDisk();
 				return;
+			case 'probeAccessibility':
+				this.probeAccessibility();
+				return;
+			case 'openAccessibilityPrefs':
+				vscode.env.openExternal(vscode.Uri.parse('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'));
+				return;
 			case 'clearHistory':
 				try {
 					const paths = getPaths();
@@ -222,8 +245,51 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	public refreshStatus(): void {
 		this._post({
 			type: 'status',
-			data: { ...getPaths(), hookInstalled: isHookInstalled() }
+			data: {
+				...getPaths(),
+				hookInstalled: isHookInstalled(),
+				nativeStatus: loadNativeStatus()
+			}
 		});
+	}
+
+	/**
+	 * Try a very lightweight osascript probe to surface Accessibility /
+	 * Automation permission state in the UI. On success, writes ok=true to
+	 * the native-status file. On failure (most commonly timeout because the
+	 * permission isn't granted), writes the error and the UI prompts the
+	 * user to open System Settings.
+	 *
+	 * The first time this runs on a system that hasn't granted the
+	 * permission, macOS shows the standard "Visual Studio Code wants to
+	 * control System Events" prompt — clicking Allow grants the permission.
+	 */
+	public async probeAccessibility(): Promise<void> {
+		if (process.platform !== 'darwin') {
+			this._post({ type: 'note', data: 'Native submit is macOS-only. On other platforms the queue uses Stop-hook feedback delivery, which always works.' });
+			return;
+		}
+		const paths = getPaths();
+		this._post({ type: 'note', data: 'Probing macOS Accessibility… if no permission yet, watch for a "Visual Studio Code wants to control System Events" prompt.' });
+		try {
+			cp.execFileSync(
+				'osascript',
+				['-e', 'tell application "System Events" to get name of first application process'],
+				{ encoding: 'utf8', timeout: 2500 }
+			);
+			fs.writeFileSync(paths.nativeStatusFile, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
+			this._post({ type: 'note', data: '✓ Accessibility permission OK — native submit will work for the next Stop hook fire.' });
+		} catch (err: any) {
+			const msg = (err && err.message || String(err)).toString();
+			fs.writeFileSync(paths.nativeStatusFile, JSON.stringify({
+				ok: false, lastError: msg, timedOut: msg.indexOf('ETIMEDOUT') >= 0, at: Date.now()
+			}, null, 2));
+			this._post({
+				type: 'note',
+				data: '✗ Accessibility probe failed: ' + msg + '\nOpen System Settings → Privacy & Security → Automation, find Visual Studio Code in the list, expand it, and allow "System Events". Then click Probe again.'
+			});
+		}
+		this.refreshStatus();
 	}
 
 	/**

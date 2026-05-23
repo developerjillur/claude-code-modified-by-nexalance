@@ -15,6 +15,28 @@ const STABLE_HOOK_PATH = path.join(CLAUDE_DIR, 'claude-mod-hook.js');
 // Pasted images and picked files attached to queue prompts are written here.
 // Claude can read these via its Read tool when the hook fires the prompt.
 const ATTACHMENTS_DIR = path.join(CLAUDE_DIR, 'claude-mod-attachments');
+// The hook writes a one-line status breadcrumb here every time native
+// submit either succeeds or fails, so the extension can show a setup
+// prompt when Accessibility / Automation permission is missing.
+const NATIVE_STATUS_FILE = path.join(CLAUDE_DIR, 'claude-mod-native-status.json');
+
+export interface NativeStatus {
+	ok: boolean;
+	lastError?: string;
+	timedOut?: boolean;
+	at: number;
+}
+
+export function getNativeStatusFile(): string { return NATIVE_STATUS_FILE; }
+
+export function loadNativeStatus(): NativeStatus | null {
+	if (!fs.existsSync(NATIVE_STATUS_FILE)) { return null; }
+	try {
+		const parsed = JSON.parse(fs.readFileSync(NATIVE_STATUS_FILE, 'utf8'));
+		if (parsed && typeof parsed.at === 'number') { return parsed as NativeStatus; }
+	} catch (_) { /* fall through */ }
+	return null;
+}
 
 export function getAttachmentsDir(): string {
 	if (!fs.existsSync(ATTACHMENTS_DIR)) {
@@ -60,6 +82,7 @@ export interface HookStatus {
 	historyFile: string;
 	hookScript: string;
 	settingsFile: string;
+	nativeStatusFile: string;
 }
 
 export function getPaths(): Omit<HookStatus, 'hookInstalled'> {
@@ -67,7 +90,8 @@ export function getPaths(): Omit<HookStatus, 'hookInstalled'> {
 		queueFile: QUEUE_FILE,
 		historyFile: HISTORY_FILE,
 		hookScript: STABLE_HOOK_PATH,
-		settingsFile: SETTINGS_FILE
+		settingsFile: SETTINGS_FILE,
+		nativeStatusFile: NATIVE_STATUS_FILE
 	};
 }
 
@@ -169,7 +193,8 @@ export function installHook(extensionPath: string): HookStatus {
 		queueFile: QUEUE_FILE,
 		historyFile: HISTORY_FILE,
 		hookScript: STABLE_HOOK_PATH,
-		settingsFile: SETTINGS_FILE
+		settingsFile: SETTINGS_FILE,
+		nativeStatusFile: NATIVE_STATUS_FILE
 	};
 }
 

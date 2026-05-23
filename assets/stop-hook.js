@@ -105,11 +105,28 @@ function tryNativeSubmit(text) {
 	try {
 		const stdout = cp.execFileSync('osascript', ['-e', script], {
 			encoding: 'utf8',
-			timeout: 6000
+			// 2 seconds is plenty for the happy path (activate + 3 keystrokes ≈ 600ms).
+			// Longer timeouts mostly help nothing — if osascript hangs that long it's
+			// almost certainly waiting on a missing Accessibility / Automation
+			// permission, which won't resolve mid-call. Bail fast so Claude Code's
+			// Stop event isn't blocked, and fall back to the feedback path.
+			timeout: 2000
 		});
 		return typeof stdout === 'string' && stdout.trim() === 'ok';
 	} catch (err) {
-		process.stderr.write('[claude-mod stop-hook] osascript failed: ' + (err && err.message || err) + '\n');
+		const msg = (err && err.message || String(err)).toString();
+		process.stderr.write('[claude-mod stop-hook] osascript failed: ' + msg + '\n');
+		// Write a one-line breadcrumb the extension can surface in the UI
+		// so the user knows native submit is failing + why.
+		try {
+			const flagPath = path.join(CLAUDE_DIR, 'claude-mod-native-status.json');
+			atomicWrite(flagPath, JSON.stringify({
+				ok: false,
+				lastError: msg,
+				timedOut: msg.indexOf('ETIMEDOUT') >= 0,
+				at: Date.now()
+			}, null, 2));
+		} catch (_) { /* noop */ }
 		return false;
 	} finally {
 		try { fs.unlinkSync(tmp); } catch (_) { /* noop */ }
@@ -163,6 +180,12 @@ process.stdin.on('end', () => {
 
 	// Preferred: native user-message look via osascript.
 	if (tryNativeSubmit(text)) {
+		// On success, clear the "native failing" breadcrumb so the UI
+		// reflects the current healthy state.
+		try {
+			const flagPath = path.join(CLAUDE_DIR, 'claude-mod-native-status.json');
+			atomicWrite(flagPath, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
+		} catch (_) { /* noop */ }
 		process.stdout.write(JSON.stringify({}));
 		return;
 	}

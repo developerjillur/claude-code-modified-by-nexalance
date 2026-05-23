@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.7] - 2026-05-23 — Native-submit setup flow + 2s timeout
+
+### Diagnosed — v0.2.6 fell back to feedback because Accessibility permission was missing
+
+v0.2.6's hook tried `osascript` → System Events → keystroke into Claude's chat, but on a fresh machine the macOS Accessibility / Automation permission for VS Code isn't yet granted. The system silently blocks `System Events` calls until the user grants permission, so the call hung for the full 6-second timeout, and the hook fell back to its `decision:block + reason` path — every fired prompt kept appearing under the "Stop hook feedback:" label.
+
+### Fixed in v0.2.7
+
+- **Hook timeout 6s → 2s.** Bails fast on permission failure so Claude Code's Stop event isn't delayed.
+- **Native-submit status breadcrumb.** The hook writes `~/.claude/claude-mod-native-status.json` with `{ok, lastError, timedOut, at}` on every fire. The extension reads this and surfaces it in the sidebar as a status pill.
+- **New "Native submit" status pill** in the sidebar status card — green when working, red `✗ permission missing` when osascript times out, yellow `unknown — click Probe` before the first fire.
+- **Two new buttons** in the status card:
+  - **Probe native** — runs a 2.5s osascript ping to either confirm permission is OK or to trigger the macOS "Visual Studio Code wants to control System Events" prompt.
+  - **Open prefs** — deep-links to System Settings → Privacy & Security → Automation so you can flip the toggle for VS Code.
+- New commands: `claude-code-modified.probeAccessibility`, `claude-code-modified.openAccessibilityPrefs`.
+
+### How to enable native submit (one-time)
+
+1. Click **Probe native** in the sidebar status card.
+2. macOS shows: *"Visual Studio Code wants to control System Events"* → click **OK**.
+3. Pill flips to `✓ working`. From now on, every Stop hook fire types the prompt into Claude's chat as a real user message — no "Stop hook feedback:" prefix.
+
+If you missed the prompt:
+
+1. Click **Open prefs**.
+2. In Automation, find **Visual Studio Code** in the list, expand it, enable **System Events**.
+3. Click **Probe native** again — pill should flip to green.
+
 ## [0.2.6] - 2026-05-23 — Native submit (Stop hook types prompts as real user messages)
 
 ### Changed — Stop hook now delivers via osascript by default, falls back to feedback
