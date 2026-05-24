@@ -154,6 +154,11 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	private _watchers: Array<{ close: () => void }> = [];
 	private _kickInFlight = false;
 	private _lastAutoKickAt = 0;
+	// v0.2.16 — set the moment kickClaudeCodeChat returns success, BEFORE
+	// Claude Code's UserPromptSubmit hook has had time to write the
+	// user-submit.json marker file. Closes the file-write race that caused
+	// 5 kicks to fire in 4 seconds.
+	private _lastSuccessfulKickAt = 0;
 	private _periodicTimer: NodeJS.Timeout | undefined;
 	private _paths: WorkspacePaths = currentPaths();
 
@@ -396,7 +401,14 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	public _maybeAutoKick(): void {
 		if (this._kickInFlight) { return; }
 		const now = Date.now();
-		const lastSubAt = this._lastUserSubmitAt();
+		const fileLastSubAt = this._lastUserSubmitAt();
+		// Effective LASTSUB: take the max of the file-based timestamp (from
+		// the UserPromptSubmit hook) and our in-memory _lastSuccessfulKickAt
+		// (which we set the moment osascript returns success). This closes
+		// the race where Claude Code hasn't written user-submit.json yet
+		// after our typed-in prompt but our next saveQueue handler has
+		// already evaluated the busy check.
+		const lastSubAt = Math.max(fileLastSubAt, this._lastSuccessfulKickAt);
 		const lastStopAt = this._lastHookFireAt();
 		const lastKickAt = this._lastAutoKickAt;
 
@@ -500,6 +512,12 @@ class QueueProvider implements vscode.WebviewViewProvider {
 
 			const result = await kickClaudeCodeChat(head.text || '');
 			if (result.success) {
+				// Set _lastSuccessfulKickAt IMMEDIATELY — before the
+				// UserPromptSubmit hook can race-write user-submit.json
+				// behind us. Any auto-kick attempt between here and that
+				// file write will see this in-memory value and correctly
+				// treat Claude as busy.
+				this._lastSuccessfulKickAt = Date.now();
 				try { this._appendHistory(head.text || ''); } catch (_) { /* noop */ }
 				this.pushHistoryFromDisk();
 			} else {

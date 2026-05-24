@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.2.16] - 2026-05-24 — Closes the file-write race that let 5 kicks fire in 4 seconds
+
+### Diagnosed — v0.2.15's busy check could be fooled by file-write timing
+
+Live trace from a user session:
+
+```
+History: 5 entries, ALL source=extension-kick (none source=hook!)
+  T+0s   extension-kick: "All right we has to get a big plan..."
+  T+1s   extension-kick: "all right base on the perssona test..."
+  T+2s   extension-kick: "All right now we has to get this..."
+  T+3s   extension-kick: "All right here is the client provided..."
+  T+4s   extension-kick: "all right now let's do run a full test..."
+user-submit.json: T+19s   ← only ONE entry (file gets overwritten each time)
+```
+
+Five auto-kicks fired in four seconds because each saveQueue `0→1` transition triggered `_maybeAutoKick`, and Claude Code's UserPromptSubmit hook hadn't yet written `user-submit.json` for the previous kick when the next `saveQueue` evaluated the busy check. So `LASTSUB` looked unchanged and the gate let the next kick through.
+
+### Fix — track `_lastSuccessfulKickAt` in-memory
+
+The extension now sets a `_lastSuccessfulKickAt` timestamp **the instant osascript returns success** — before Claude Code's hook subprocess has had time to write the marker file. The watchdog gate now uses:
+
+```ts
+const lastSubAt = Math.max(fileLastSubAt, this._lastSuccessfulKickAt);
+```
+
+This closes the race entirely. Any auto-kick attempt between osascript succeeding and Claude Code writing `user-submit.json` correctly sees Claude as busy (via the in-memory timestamp) and skips.
+
+### Tests
+
+```
+=== v0.2.16 — in-memory _lastSuccessfulKickAt closes file-write race ===
+  ✓ extension declares _lastSuccessfulKickAt
+  ✓ extension takes Math.max(fileLastSubAt, in-memory)
+  ✓ _lastSuccessfulKickAt is set on successful kick (1 assignment found)
+```
+
 ## [0.2.15] - 2026-05-24 — Native busy-tracking via UserPromptSubmit hook
 
 ### The real fix you asked for

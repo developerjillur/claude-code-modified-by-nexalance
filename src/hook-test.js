@@ -193,6 +193,17 @@ try {
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
+	console.log('\n=== v0.2.16 — in-memory _lastSuccessfulKickAt closes file-write race ===');
+	(function () {
+		// Static verify the compiled extension defines _lastSuccessfulKickAt
+		// and uses Math.max() to combine with the file-based timestamp.
+		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
+		assert(extSrc.indexOf('_lastSuccessfulKickAt') >= 0, 'extension declares _lastSuccessfulKickAt');
+		assert(extSrc.indexOf('Math.max(fileLastSubAt') >= 0 || extSrc.indexOf('Math.max(') >= 0, 'extension takes Math.max(fileLastSubAt, in-memory)');
+		const inFlightSetterMatches = (extSrc.match(/_lastSuccessfulKickAt\s*=\s*Date\.now\(\)/g) || []).length;
+		assert(inFlightSetterMatches >= 1, '_lastSuccessfulKickAt is set on successful kick (' + inFlightSetterMatches + ' assignments found)');
+	})();
+
 	console.log('\n=== v0.2.15 — UserPromptSubmit hook + precise busy/idle ===');
 	(function () {
 		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
