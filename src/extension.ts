@@ -469,6 +469,29 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	}
 
 	/**
+	 * After a successful osascript kick, poll the user-submit marker file
+	 * for up to 5 seconds. If Claude Code received the typed prompt, its
+	 * UserPromptSubmit hook will have fired and updated the marker. If the
+	 * marker doesn't advance, osascript "succeeded" but the paste went
+	 * somewhere other than Claude's chat input — we put the item back.
+	 */
+	private async _verifyKickReachedClaudeCode(subBeforeKick: number, kickStartedAt: number): Promise<boolean> {
+		const POLL_INTERVAL_MS = 100;
+		const TIMEOUT_MS = 5_000;
+		const start = Date.now();
+		while (Date.now() - start < TIMEOUT_MS) {
+			await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+			const subNow = this._lastUserSubmitAt();
+			// New submit recorded AFTER our kick started → Claude Code
+			// received the prompt.
+			if (subNow > subBeforeKick && subNow >= kickStartedAt - 1000) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Start a 30-second periodic check that unstucks the queue if Claude
 	 * Code stops firing Stop hooks for any reason (session ended, hook
 	 * timeout, etc.). The actual decision to kick is made by _maybeAutoKick
@@ -533,7 +556,28 @@ class QueueProvider implements vscode.WebviewViewProvider {
 			saveQueueToFile(this._paths.queueFile, rest);
 			this._post({ type: 'restoreQueue', data: rest });
 
-			const result = await kickClaudeCodeChat(head.text || '');
+			// v0.2.18 — focus Anthropic's chat input via their VS Code
+			// command BEFORE osascript runs. Their Cmd+Esc keybinding has
+			// a `when: editorTextFocus` clause, so when our Fire-now
+			// button is clicked the keystroke fires from a webview (no
+			// editor focus) and does nothing — the paste would then land
+			// in the wrong control. executeCommand bypasses the when
+			// clause and focuses Claude's chat unconditionally.
+			let focusedViaCommand = false;
+			try {
+				await vscode.commands.executeCommand('claude-vscode.focus');
+				focusedViaCommand = true;
+				// Small settle for focus to take effect before paste
+				await new Promise<void>((r) => setTimeout(r, 200));
+			} catch (_) {
+				// Anthropic extension missing or older version without the
+				// focus command — fall back to the osascript Cmd+Esc dance.
+				focusedViaCommand = false;
+			}
+
+			const kickStartedAt = Date.now();
+			const subBeforeKick = this._lastUserSubmitAt();
+			const result = await kickClaudeCodeChat(head.text || '', { skipFocusKeystroke: focusedViaCommand });
 			if (result.success) {
 				// Set _lastSuccessfulKickAt IMMEDIATELY — before the
 				// UserPromptSubmit hook can race-write user-submit.json
@@ -543,6 +587,30 @@ class QueueProvider implements vscode.WebviewViewProvider {
 				this._lastSuccessfulKickAt = Date.now();
 				try { this._appendHistory(head.text || ''); } catch (_) { /* noop */ }
 				this.pushHistoryFromDisk();
+
+				// v0.2.18 — verify osascript actually reached Claude Code
+				// by polling user-submit.json for an update. osascript can
+				// return "ok" even when the paste landed in the wrong
+				// control (e.g., when chat input wasn't focused).
+				const verified = await this._verifyKickReachedClaudeCode(subBeforeKick, kickStartedAt);
+				if (!verified) {
+					// Put the item back at the head so it isn't lost.
+					const restored = [head, ...rest];
+					saveQueueToFile(this._paths.queueFile, restored);
+					this._post({ type: 'restoreQueue', data: restored });
+					this._post({
+						type: 'note',
+						data: '⚠ Kick fired but Claude Code did not register the prompt — the paste may have landed in the wrong control. Click into Claude Code\'s chat input manually, then Fire now again. If this keeps happening, restart Claude Code\'s session.'
+					});
+					vscode.window.showWarningMessage(
+						'Claude Mod: kick fired but Claude Code did not receive the prompt. Click into the chat input manually and try again.',
+						'Focus Claude'
+					).then((choice) => {
+						if (choice === 'Focus Claude') {
+							vscode.commands.executeCommand('claude-vscode.focus').then(undefined, () => {});
+						}
+					});
+				}
 			} else {
 				// Put the item back so it isn't lost.
 				const restored = [head, ...rest];

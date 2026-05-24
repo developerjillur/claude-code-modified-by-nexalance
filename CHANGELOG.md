@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.2.18] - 2026-05-24 — Native chat focus + post-kick verification
+
+### Diagnosed — osascript "succeeded" but Claude Code never received the prompt
+
+Live diagnostic from a Kvanti-3 session:
+
+```
+LASTSUB (UserPromptSubmit fired) : 38.7 min ago
+LASTEXTKICK (our osascript ran)  :  1.8 min ago
+```
+
+The extension's kick ran 1.8 minutes ago and osascript returned `ok`. But `user-submit.json` still showed the 38-min-old value — Claude Code's UserPromptSubmit hook never fired for the typed prompt. So the paste landed somewhere other than Claude's chat input.
+
+Root cause: Anthropic's `Cmd+Escape` keybinding has a `when` clause:
+
+```
+"when": "!config.claudeCode.useTerminal && editorTextFocus"
+```
+
+It only fires `claude-vscode.focus` when an **editor** has text focus. When you click ▶ Fire now in our webview, focus is in the webview — NOT in an editor. The keystroke is silently dropped and our paste lands in whatever was focused before (most often our own webview).
+
+### Fix
+
+The extension now calls `vscode.commands.executeCommand('claude-vscode.focus')` directly **before** spawning osascript. Invoking the command via the VS Code API bypasses the keybinding's `when` clause and focuses Claude's chat input unconditionally. The osascript then just pastes + Enter (with no Cmd+Esc), guaranteed to land in the right control.
+
+### Added — Post-kick verification
+
+After osascript returns success, the extension polls `user-submit.json` for up to 5 seconds. If Claude Code received the typed prompt, its UserPromptSubmit hook updates the marker. If the marker doesn't advance, osascript "succeeded" but the paste missed the chat input. In that case:
+
+- The item is put back at the head of the queue so it isn't lost.
+- A VS Code warning pops with a **Focus Claude** action button that runs `claude-vscode.focus` for the user.
+- A clear inline note appears in the sidebar explaining what happened.
+
+This means a silent miss can no longer drain the queue without Claude actually receiving the prompts.
+
+### Fallback path preserved
+
+If Anthropic's extension isn't installed (or it's an older version without the `claude-vscode.focus` command), the extension falls back to the old osascript-Cmd+Esc approach. Users without the native command still get the previous behavior.
+
+### Tests
+
+```
+=== v0.2.18 — focus Claude chat via native VS Code command + post-kick verification ===
+  ✓ extension uses claude-vscode.focus command (Anthropic native)
+  ✓ extension passes skipFocusKeystroke to kickClaudeCodeChat
+  ✓ extension defines _verifyKickReachedClaudeCode
+  ✓ extension captures user-submit timestamp before kick for verification
+  ✓ extension emits a clear warning when kick missed the chat input
+  ✓ auto-kick honors skipFocusKeystroke option
+  ✓ auto-kick builds the AppleScript focus stanza conditionally
+```
+
+All 90+ unit tests + 39 live E2E tests still green.
+
 ## [0.2.17] - 2026-05-24 — Stale-submit recovery (queue no longer stuck when Claude Code stops firing Stop)
 
 ### Diagnosed from a live Kvanti-3 inspection

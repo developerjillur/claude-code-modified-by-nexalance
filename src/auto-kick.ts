@@ -27,7 +27,15 @@ export interface KickResult {
 	error?: string;
 }
 
-export async function kickClaudeCodeChat(text: string): Promise<KickResult> {
+export interface KickOptions {
+	// If true, skip the ⌘ Esc keystroke that focuses Claude's chat input
+	// (used when the caller has already focused via the
+	// `claude-vscode.focus` VS Code command, which bypasses the
+	// keybinding's when-clause and works regardless of where focus is).
+	skipFocusKeystroke?: boolean;
+}
+
+export async function kickClaudeCodeChat(text: string, options?: KickOptions): Promise<KickResult> {
 	if (process.platform !== 'darwin') {
 		return { success: false, error: 'Auto-kick currently supports macOS only (osascript).' };
 	}
@@ -48,6 +56,18 @@ export async function kickClaudeCodeChat(text: string): Promise<KickResult> {
 	// Escape the path for AppleScript — backslash + double quote
 	const escapedPath = tmpFile.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
+	// If the extension already focused Claude's chat via the
+	// `claude-vscode.focus` VS Code command, skip the ⌘ Esc keystroke.
+	// (Anthropic's keybinding for ⌘ Esc has a `when` clause of
+	// "!useTerminal && editorTextFocus" — when our webview's Fire-now
+	// button has focus, that's NOT in an editor, so the keystroke is
+	// silently dropped and our paste lands in the wrong control.
+	// executeCommand bypasses the when-clause and focuses unconditionally.)
+	const skipFocus = !!(options && options.skipFocusKeystroke);
+	const focusStanza = skipFocus
+		? '-- focus already obtained via vscode.commands.executeCommand("claude-vscode.focus")'
+		: 'keystroke (ASCII character 27) using {command down}\n\t\t\t\tdelay 0.25';
+
 	const script = `
 		try
 			set kickFile to POSIX file "${escapedPath}"
@@ -56,9 +76,7 @@ export async function kickClaudeCodeChat(text: string): Promise<KickResult> {
 			tell application "Visual Studio Code" to activate
 			delay 0.3
 			tell application "System Events"
-				-- ⌘ Esc focuses Anthropic Claude Code's chat input
-				keystroke (ASCII character 27) using {command down}
-				delay 0.25
+				${focusStanza}
 				-- Paste
 				keystroke "v" using {command down}
 				delay 0.25

@@ -193,6 +193,21 @@ try {
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
+	console.log('\n=== v0.2.18 — focus Claude chat via native VS Code command + post-kick verification ===');
+	(function () {
+		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
+		assert(extSrc.indexOf("claude-vscode.focus") >= 0, 'extension uses claude-vscode.focus command (Anthropic native)');
+		assert(extSrc.indexOf('skipFocusKeystroke') >= 0, 'extension passes skipFocusKeystroke to kickClaudeCodeChat');
+		assert(extSrc.indexOf('_verifyKickReachedClaudeCode') >= 0, 'extension defines _verifyKickReachedClaudeCode');
+		assert(extSrc.indexOf('subBeforeKick') >= 0, 'extension captures user-submit timestamp before kick for verification');
+		assert(extSrc.indexOf('did not register the prompt') >= 0, 'extension emits a clear warning when kick missed the chat input');
+
+		const akSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/auto-kick.js'), 'utf8');
+		// TypeScript interfaces are erased; check for runtime evidence instead
+		assert(akSrc.indexOf('skipFocusKeystroke') >= 0, 'auto-kick honors skipFocusKeystroke option');
+		assert(akSrc.indexOf('focusStanza') >= 0, 'auto-kick builds the AppleScript focus stanza conditionally');
+	})();
+
 	console.log('\n=== v0.2.17 — stale-submit recovery (LASTSUB > LASTSTOP but ancient → kick) ===');
 	(function () {
 		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
