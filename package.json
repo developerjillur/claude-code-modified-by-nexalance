@@ -2,7 +2,7 @@
   "name": "claude-code-modified-by-nexalance",
   "displayName": "Claude Code Modified by NexaLance",
   "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
-  "version": "0.2.20",
+  "version": "0.3.0",
   "publisher": "DeveloperJillur",
   "author": "Developer Jillur",
   "repository": {
@@ -48,21 +48,6 @@
         "command": "claude-code-modified.uninstallHook",
         "title": "Uninstall Stop hook from ~/.claude/settings.json",
         "category": "Claude Mod"
-      },
-      {
-        "command": "claude-code-modified.fireNow",
-        "title": "Fire the next pending prompt into Claude Code now",
-        "category": "Claude Mod"
-      },
-      {
-        "command": "claude-code-modified.probeAccessibility",
-        "title": "Probe macOS Accessibility (test or trigger the permission prompt)",
-        "category": "Claude Mod"
-      },
-      {
-        "command": "claude-code-modified.openAccessibilityPrefs",
-        "title": "Open System Settings → Privacy & Security → Automation",
-        "category": "Claude Mod"
       }
     ],
     "viewsContainers": {
@@ -90,16 +75,6 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically open the Claude Mod sidebar every time VS Code starts, so you never have to hunt for the icon. Turn off if you find it intrusive."
-        },
-        "claudeCodeModified.autoKickWhenIdle": {
-          "type": "boolean",
-          "default": true,
-          "description": "When the queue has items and Claude appears idle, automatically push the head item into Claude's chat via osascript. Has the v0.2.18 verification safety net: if osascript paste succeeds but Claude Code's UserPromptSubmit hook doesn't fire within 5 seconds, the item is restored to the queue and a warning is shown. Turn off if you only want the Stop hook (decision:block+reason) drain path."
-        },
-        "claudeCodeModified.enableNativeSubmit": {
-          "type": "boolean",
-          "default": true,
-          "description": "When enabled, the Stop hook tries to paste each queued prompt into Claude's chat via osascript so it appears as a real user message. If osascript fails (no Accessibility permission, focus issues, etc.), automatically falls back to decision:block+reason which delivers reliably under the 'Stop hook feedback:' label. Off by default in v0.2.19 was the wrong call — re-enabled in v0.2.20."
         }
       }
     }

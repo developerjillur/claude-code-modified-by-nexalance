@@ -2,44 +2,44 @@
 /*
  * Claude Mod by NexaLance — Stop hook for Claude Code.
  *
- * v0.2.8 — per-workspace queues. The stop event JSON includes the working
- * directory of the active Claude session (`cwd`). We derive the workspace
- * data directory from that path and read/write the per-workspace
- * queue / history / native-status files there. That way each project keeps
- * its own queue, so a queued prompt for project A never fires when the user
- * is working on project B.
+ * v0.3.0 — Feedback-only flow. The one design that always worked.
  *
- * Two delivery strategies, in order:
+ * Runs every time Claude Code finishes a turn ("Stop"). Reads the next
+ * pending prompt from the per-workspace queue file. If there's an item:
+ *   - remove it from the queue file (atomically)
+ *   - append a record to the history file (source: 'hook')
+ *   - return {"decision":"block","reason":<prompt>} so Claude Code does
+ *     NOT stop and instead continues with the queued prompt as its next
+ *     instruction
  *
- *   1. NATIVE (preferred): spawn osascript synchronously to activate VS
- *      Code, focus Anthropic's chat input via ⌘ Esc, paste the prompt, and
- *      press Return. The prompt appears in Claude's chat as a real user
- *      message.
+ * If the queue is empty, return {} (Claude stops normally).
  *
- *   2. FEEDBACK (fallback): if osascript fails (no Accessibility permission,
- *      osascript not on PATH, VS Code not running, etc.), return the prompt
- *      via the standard Claude Code Stop-hook decision
- *      `{decision:"block", reason:<prompt>}`. Claude continues with the
- *      reason as its next instruction.
+ * No osascript, no native typing into Claude's chat input, no
+ * UserPromptSubmit-hook bookkeeping, no env-var toggles. Just the
+ * reliable decision-block-reason flow that delivers each prompt INSIDE
+ * Claude Code's own process. The "Stop hook feedback:" label Claude
+ * Code displays is cosmetic — the prompt itself is fully processed.
  *
- * Loop protection: respects `stop_hook_active` from the incoming event.
+ * Workspace resolution: derived from the Stop event's `cwd` field,
+ * canonicalized via path.resolve + fs.realpathSync so trailing slashes
+ * and symlinks all hash to the same per-workspace dir.
+ *
+ * Loop protection: respects `stop_hook_active` from the incoming event
+ * AND tracks a per-workspace block-chain counter (capped at 200 fires
+ * in a 5-minute window) as a safety against truly pathological cases.
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const cp = require('child_process');
 const crypto = require('crypto');
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const WORKSPACES_ROOT = path.join(CLAUDE_DIR, 'claude-mod-queues');
 const MAX_HISTORY = 50;
+const MAX_CONSECUTIVE_BLOCK_FIRES = 200;
+const CHAIN_RESET_AFTER_MS = 5 * 60 * 1000;
 
-// IMPORTANT: this canonicalization must stay in sync with the same function
-// in src/hook-setup.ts. The extension and the hook BOTH compute the per-
-// workspace dir name from the same input; if their canonicalizations differ
-// (trailing slash, symlink resolution, relative components), they end up
-// reading and writing different files and never see each other's queue.
 function canonicalizeWorkspacePath(workspacePath) {
 	if (!workspacePath || workspacePath === '__no-workspace__') {
 		return '__no-workspace__';
@@ -66,7 +66,7 @@ function pathsForWorkspace(workspacePath) {
 		dir: dir,
 		queueFile: path.join(dir, 'queue.json'),
 		historyFile: path.join(dir, 'history.json'),
-		nativeStatusFile: path.join(dir, 'native-status.json')
+		chainFile: path.join(dir, 'block-chain.json')
 	};
 }
 
@@ -86,100 +86,11 @@ function appendHistory(historyFile, text) {
 			if (Array.isArray(parsed)) { entries = parsed; }
 		} catch (_) { /* corrupt → start fresh */ }
 	}
-	// source:'hook' marks this as a real Claude-Code Stop event (Claude
-	// finished a turn). The extension uses this to distinguish hook fires
-	// from its own watchdog kicks when deciding whether to fire another
-	// watchdog kick. Without this tag, the watchdog couldn't tell that an
-	// extension-side kick was still being processed by Claude and would
-	// fire again 30s later, mid-turn.
 	entries.push({ text: text, firedAt: Date.now(), source: 'hook' });
 	if (entries.length > MAX_HISTORY) { entries = entries.slice(-MAX_HISTORY); }
 	try { atomicWrite(historyFile, JSON.stringify(entries, null, 2)); }
 	catch (err) { process.stderr.write('[claude-mod stop-hook] history write failed: ' + err.message + '\n'); }
 }
-
-function tryNativeSubmit(text, nativeStatusFile) {
-	if (process.platform !== 'darwin') { return false; }
-	// v0.2.20 — Native osascript is the default again (controlled by the
-	// extension's claudeCodeModified.enableNativeSubmit setting, which
-	// writes CLAUDE_MOD_ENABLE_NATIVE=1 into the hook command). The
-	// extension's v0.2.18 post-kick verification + restore-on-miss
-	// safety net catches the cases where paste lands but Enter doesn't
-	// trigger Claude's submit handler.
-	// If the explicit disable env var is set, honor it (lets users force
-	// feedback mode for specific scenarios).
-	if (process.env.CLAUDE_MOD_DISABLE_NATIVE === '1') { return false; }
-	// Opt-out semantics: if neither env var is set, default to native.
-	// (Earlier versions required opt-in; v0.2.20 changes default back.)
-	if (process.env.CLAUDE_MOD_ENABLE_NATIVE === '0') { return false; }
-
-	const tmp = path.join(os.tmpdir(), 'claude-mod-hook-' + Date.now() + '-' + Math.floor(Math.random() * 1e6) + '.txt');
-	try { fs.writeFileSync(tmp, text); }
-	catch (_) { return false; }
-
-	const escapedPath = tmp.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-	// v0.2.20 reliability tweaks:
-	//   - longer activation delay (0.4s) — VS Code's window focus on macOS
-	//     can lag noticeably under load.
-	//   - longer paste-to-submit gap (0.5s) — Claude's webview React paste
-	//     handler needs time to settle the new value into state BEFORE
-	//     it'll honor a synthesized Enter as a submit.
-	//   - double Enter — first one is sometimes consumed by the React
-	//     paste handler instead of submit; the second one then submits
-	//     a (now-empty) input which is a no-op. If the first Enter
-	//     submitted, the second one's no-op is harmless.
-	const script = `
-		try
-			set kickFile to POSIX file "${escapedPath}"
-			set kickContents to (read kickFile as «class utf8»)
-			set the clipboard to kickContents
-			tell application "Visual Studio Code" to activate
-			delay 0.4
-			tell application "System Events"
-				keystroke (ASCII character 27) using {command down}
-				delay 0.25
-				keystroke "v" using {command down}
-				delay 0.5
-				key code 36
-				delay 0.15
-				key code 36
-			end tell
-			return "ok"
-		on error errMsg number errNum
-			return "ERR " & errNum & ": " & errMsg
-		end try
-	`;
-
-	try {
-		const stdout = cp.execFileSync('osascript', ['-e', script], {
-			encoding: 'utf8',
-			timeout: 2000
-		});
-		return typeof stdout === 'string' && stdout.trim() === 'ok';
-	} catch (err) {
-		const msg = (err && err.message || String(err)).toString();
-		process.stderr.write('[claude-mod stop-hook] osascript failed: ' + msg + '\n');
-		try {
-			atomicWrite(nativeStatusFile, JSON.stringify({
-				ok: false, lastError: msg, timedOut: msg.indexOf('ETIMEDOUT') >= 0, at: Date.now()
-			}, null, 2));
-		} catch (_) { /* noop */ }
-		return false;
-	} finally {
-		try { fs.unlinkSync(tmp); } catch (_) { /* noop */ }
-	}
-}
-
-// SAFETY: hard cap on how many consecutive block+reason fires we'll do
-// before we let Claude actually stop and wait for fresh user input. This
-// matters only if osascript native submit is not working — when native
-// submit succeeds, each fire is a separate user turn with no
-// stop_hook_active flag carrying over. When we have to fall back to
-// decision:block, every subsequent Stop event in the same chain has
-// stop_hook_active=true; that's fine for us (queue is bounded), but if
-// the user has queued thousands of items we don't want one chain to
-// monopolise Claude for hours. 200 is plenty for normal use.
-const MAX_CONSECUTIVE_BLOCK_FIRES = 200;
 
 let stdinBuf = '';
 process.stdin.setEncoding('utf8');
@@ -188,17 +99,8 @@ process.stdin.on('end', () => {
 	let event = {};
 	try { event = JSON.parse(stdinBuf || '{}'); } catch (_) { /* tolerate non-JSON */ }
 
-	// NOTE: v0.2.12 — we deliberately do NOT bail when stop_hook_active is
-	// true. Earlier versions did, but that meant the queue only drained one
-	// item per Claude continuation chain — every subsequent Stop event in
-	// the same chain returned {} immediately and the remaining queue sat.
-	// Our hook is safe to fire repeatedly because it drains (shifts) the
-	// queue every time; the queue is naturally bounded, so no infinite-loop
-	// risk. The MAX_CONSECUTIVE_BLOCK_FIRES cap above is the only safety.
-
-	// Pick the workspace from the event. `cwd` is set by Claude Code to the
-	// session's working directory. Fall back to our own process cwd if for
-	// some reason the event lacks it.
+	// `cwd` is set by Claude Code to the session's working directory.
+	// Fall back to our own process cwd if missing.
 	const workspacePath = (event && typeof event.cwd === 'string' && event.cwd)
 		|| process.cwd()
 		|| '__no-workspace__';
@@ -237,32 +139,22 @@ process.stdin.on('end', () => {
 
 	appendHistory(p.historyFile, text);
 
-	if (tryNativeSubmit(text, p.nativeStatusFile)) {
-		try {
-			atomicWrite(p.nativeStatusFile, JSON.stringify({ ok: true, at: Date.now() }, null, 2));
-		} catch (_) { /* noop */ }
-		process.stdout.write(JSON.stringify({}));
-		return;
-	}
-
-	// Feedback fallback. Before emitting the decision:block, check how many
-	// consecutive block-fires we've done in this chain — if we're past the
-	// safety cap, let Claude stop instead.
-	const chainFile = path.join(p.dir, 'block-chain.json');
+	// Track consecutive block-fires in this chain. A real Claude Code
+	// continuation chain typically drains a few items in sequence; this
+	// counter guards against truly pathological multi-hundred-item cases.
+	// Reset if the last fire was > CHAIN_RESET_AFTER_MS ago (means the
+	// chain naturally ended and this is a fresh user-initiated turn).
 	let chain = { count: 0, at: 0 };
-	if (fs.existsSync(chainFile)) {
+	if (fs.existsSync(p.chainFile)) {
 		try {
-			const parsed = JSON.parse(fs.readFileSync(chainFile, 'utf8'));
+			const parsed = JSON.parse(fs.readFileSync(p.chainFile, 'utf8'));
 			if (parsed && typeof parsed.count === 'number') { chain = parsed; }
 		} catch (_) { /* fall through */ }
 	}
-	// Reset the counter if the previous block was more than 5 minutes ago
-	// — that almost certainly means a fresh user-initiated turn, not a
-	// continuation of the same chain.
-	if (Date.now() - (chain.at || 0) > 5 * 60 * 1000) { chain.count = 0; }
+	if (Date.now() - (chain.at || 0) > CHAIN_RESET_AFTER_MS) { chain.count = 0; }
 	chain.count = (chain.count || 0) + 1;
 	chain.at = Date.now();
-	try { atomicWrite(chainFile, JSON.stringify(chain, null, 2)); } catch (_) { /* noop */ }
+	try { atomicWrite(p.chainFile, JSON.stringify(chain, null, 2)); } catch (_) { /* noop */ }
 
 	if (chain.count > MAX_CONSECUTIVE_BLOCK_FIRES) {
 		process.stderr.write('[claude-mod stop-hook] hit MAX_CONSECUTIVE_BLOCK_FIRES, letting Claude stop\n');
@@ -270,6 +162,7 @@ process.stdin.on('end', () => {
 		return;
 	}
 
+	// Feedback path — the reliable one. Claude continues with the reason.
 	process.stdout.write(JSON.stringify({
 		decision: 'block',
 		reason: text

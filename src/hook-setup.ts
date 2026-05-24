@@ -4,33 +4,27 @@ import * as os from 'os';
 import * as path from 'path';
 
 const HOOK_MARKER = 'claude-mod-stop-hook';
-const USER_SUBMIT_HOOK_MARKER = 'claude-mod-user-submit-hook';
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'settings.json');
 const WORKSPACES_ROOT = path.join(CLAUDE_DIR, 'claude-mod-queues');
 const STABLE_HOOK_PATH = path.join(CLAUDE_DIR, 'claude-mod-hook.js');
-const STABLE_USER_SUBMIT_HOOK_PATH = path.join(CLAUDE_DIR, 'claude-mod-user-submit-hook.js');
 const ATTACHMENTS_DIR = path.join(CLAUDE_DIR, 'claude-mod-attachments');
 
-// Legacy v0.2.7 paths — the old global queue/history files. v0.2.8 migrates
-// these into the current workspace's queue and renames the old files to .migrated.
+// Legacy paths from older versions — migrated and renamed once on activation.
 const LEGACY_QUEUE_FILE = path.join(CLAUDE_DIR, 'claude-mod-queue.json');
 const LEGACY_HISTORY_FILE = path.join(CLAUDE_DIR, 'claude-mod-history.json');
 const LEGACY_NATIVE_STATUS_FILE = path.join(CLAUDE_DIR, 'claude-mod-native-status.json');
+const LEGACY_USER_SUBMIT_HOOK_PATH = path.join(CLAUDE_DIR, 'claude-mod-user-submit-hook.js');
 
 export interface QueueItem { id: string; text: string; createdAt: number; attachments?: string[]; }
-export interface HistoryEntry { text: string; firedAt: number; }
-export interface NativeStatus { ok: boolean; lastError?: string; timedOut?: boolean; at: number; }
+export interface HistoryEntry { text: string; firedAt: number; source?: string; }
 
 export interface WorkspacePaths {
 	workspacePath: string;
 	workspaceDir: string;
 	queueFile: string;
 	historyFile: string;
-	nativeStatusFile: string;
-	userSubmitFile: string;
 	hookScript: string;
-	userSubmitHookScript: string;
 	settingsFile: string;
 	attachmentsDir: string;
 }
@@ -38,14 +32,6 @@ export interface WorkspacePaths {
 /**
  * Canonicalize a workspace path so the same project always hashes to the
  * same dir regardless of trailing slash, relative components, or symlinks.
- *
- *   /Users/x/foo/        →   /Users/x/foo
- *   /Users/x/./foo       →   /Users/x/foo
- *   /tmp/foo (symlink)   →   /Users/x/foo  (resolved via realpath)
- *
- * Without this, the extension (which sees vscode.workspace.workspaceFolders[0].uri.fsPath)
- * and the hook (which sees the Stop event's `cwd`) can disagree on the
- * canonical form and write to two different workspace dirs.
  */
 export function canonicalizeWorkspacePath(workspacePath: string): string {
 	if (!workspacePath || workspacePath === '__no-workspace__') {
@@ -55,21 +41,10 @@ export function canonicalizeWorkspacePath(workspacePath: string): string {
 	try {
 		return fs.realpathSync(resolved);
 	} catch (_) {
-		// Path doesn't exist on disk (or no permission to resolve) — fall back
-		// to the resolved-but-not-realpathed form. Still better than the raw input.
 		return resolved;
 	}
 }
 
-/**
- * Per-workspace dir naming: `<safe-basename>-<sha1[0..8]>`.
- *
- *   /Users/x/Desktop/NexaLance/Kvanti-3   →   Kvanti-3-a3f5b2c1
- *   /Users/x/Sites/psychgate              →   psychgate-c41fd9a3
- *
- * Stable across runs (sha1 is deterministic) and human-recognisable (you can
- * tell which folder belongs to which project just by reading the dir name).
- */
 function workspaceSafeName(workspacePath: string): string {
 	const canon = canonicalizeWorkspacePath(workspacePath);
 	const baseRaw = path.basename(canon) || 'workspace';
@@ -90,19 +65,12 @@ export function getPathsForWorkspace(workspacePath: string): WorkspacePaths {
 		workspaceDir: dir,
 		queueFile: path.join(dir, 'queue.json'),
 		historyFile: path.join(dir, 'history.json'),
-		nativeStatusFile: path.join(dir, 'native-status.json'),
-		userSubmitFile: path.join(dir, 'user-submit.json'),
 		hookScript: STABLE_HOOK_PATH,
-		userSubmitHookScript: STABLE_USER_SUBMIT_HOOK_PATH,
 		settingsFile: SETTINGS_FILE,
 		attachmentsDir: ATTACHMENTS_DIR
 	};
 }
 
-// Backwards-compat alias kept so the rest of the codebase compiles. Old global
-// `getPaths()` callers now have to pick a workspace. Where no workspace is
-// available we fall back to a sentinel name so the rest of the code keeps
-// working in degenerate setups (e.g. VS Code opened with no folder).
 export function getPathsForFallback(): WorkspacePaths {
 	return getPathsForWorkspace('__no-workspace__');
 }
@@ -117,10 +85,6 @@ const MIME_TO_EXT: Record<string, string> = {
 	'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/bmp': 'bmp'
 };
 
-// 10 MB after base64 decoding. A standard 4K screenshot is ~5 MB at PNG,
-// so this is roomy enough for typical clipboard pastes but rejects the
-// 50 MB+ "I screenshotted my whole 6K monitor twice" cases that would
-// silently fill ~/.claude/claude-mod-attachments/.
 const MAX_PASTED_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export class ImageTooLargeError extends Error {
@@ -189,34 +153,6 @@ export function refreshStableHookScript(extensionPath: string): boolean {
 	return true;
 }
 
-export function refreshStableUserSubmitHookScript(extensionPath: string): boolean {
-	const src = path.join(extensionPath, 'assets', 'user-prompt-submit-hook.js');
-	if (!fs.existsSync(src)) { throw new Error('Bundled user-submit hook script missing at ' + src); }
-	if (!fs.existsSync(CLAUDE_DIR)) { fs.mkdirSync(CLAUDE_DIR, { recursive: true }); }
-	const newContents = fs.readFileSync(src, 'utf8');
-	let existing = '';
-	try {
-		if (fs.existsSync(STABLE_USER_SUBMIT_HOOK_PATH)) {
-			existing = fs.readFileSync(STABLE_USER_SUBMIT_HOOK_PATH, 'utf8');
-		}
-	} catch (_) { /* fall through */ }
-	if (existing === newContents) { return false; }
-	atomicWriteFile(STABLE_USER_SUBMIT_HOOK_PATH, newContents);
-	try { fs.chmodSync(STABLE_USER_SUBMIT_HOOK_PATH, 0o755); } catch (_) { /* non-fatal */ }
-	return true;
-}
-
-export interface UserSubmitMarker { submittedAt: number; promptLength?: number; }
-
-export function loadUserSubmitMarker(userSubmitFile: string): UserSubmitMarker | null {
-	if (!fs.existsSync(userSubmitFile)) { return null; }
-	try {
-		const parsed = JSON.parse(fs.readFileSync(userSubmitFile, 'utf8'));
-		if (parsed && typeof parsed.submittedAt === 'number') { return parsed as UserSubmitMarker; }
-	} catch (_) { /* fall through */ }
-	return null;
-}
-
 export function isHookInstalled(): boolean {
 	const settings = readSettings();
 	const stopHooks = settings?.hooks?.Stop;
@@ -226,28 +162,32 @@ export function isHookInstalled(): boolean {
 
 export function installHook(extensionPath: string): { installed: boolean; settingsFile: string; hookScript: string } {
 	refreshStableHookScript(extensionPath);
-	refreshStableUserSubmitHookScript(extensionPath);
 	const settings = readSettings();
 	if (!settings.hooks) { settings.hooks = {}; }
 	if (!Array.isArray(settings.hooks.Stop)) { settings.hooks.Stop = []; }
-	if (!Array.isArray(settings.hooks.UserPromptSubmit)) { settings.hooks.UserPromptSubmit = []; }
 
-	// Idempotent: strip prior versions of our hooks.
+	// Idempotency: strip any prior version of our hook.
 	settings.hooks.Stop = settings.hooks.Stop.filter(
 		(h: any) => !JSON.stringify(h).includes(HOOK_MARKER)
 	);
-	settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
-		(h: any) => !JSON.stringify(h).includes(USER_SUBMIT_HOOK_MARKER)
-	);
 
+	// v0.3.0 — feedback-only command, no env vars. Always plain.
+	const command = `/usr/bin/env node "${STABLE_HOOK_PATH}" # ${HOOK_MARKER}`;
 	settings.hooks.Stop.push({
 		matcher: '',
-		hooks: [{ type: 'command', command: `/usr/bin/env node "${STABLE_HOOK_PATH}" # ${HOOK_MARKER}` }]
+		hooks: [{ type: 'command', command }]
 	});
-	settings.hooks.UserPromptSubmit.push({
-		matcher: '',
-		hooks: [{ type: 'command', command: `/usr/bin/env node "${STABLE_USER_SUBMIT_HOOK_PATH}" # ${USER_SUBMIT_HOOK_MARKER}` }]
-	});
+
+	// v0.3.0 also cleans up legacy v0.2.15+ UserPromptSubmit hook entries
+	// that older versions installed — no longer used.
+	if (Array.isArray(settings.hooks.UserPromptSubmit)) {
+		settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
+			(h: any) => !JSON.stringify(h).includes('claude-mod-user-submit-hook')
+		);
+		if (settings.hooks.UserPromptSubmit.length === 0) {
+			delete settings.hooks.UserPromptSubmit;
+		}
+	}
 
 	writeSettings(settings);
 	return { installed: true, settingsFile: SETTINGS_FILE, hookScript: STABLE_HOOK_PATH };
@@ -266,7 +206,7 @@ export function uninstallHook(): { uninstalled: boolean } {
 	if (Array.isArray(settings?.hooks?.UserPromptSubmit)) {
 		const before = settings.hooks.UserPromptSubmit.length;
 		settings.hooks.UserPromptSubmit = settings.hooks.UserPromptSubmit.filter(
-			(h: any) => !JSON.stringify(h).includes(USER_SUBMIT_HOOK_MARKER)
+			(h: any) => !JSON.stringify(h).includes('claude-mod-user-submit-hook')
 		);
 		if (settings.hooks.UserPromptSubmit.length !== before) { removed = true; }
 	}
@@ -275,15 +215,69 @@ export function uninstallHook(): { uninstalled: boolean } {
 }
 
 /**
- * Loads the queue and drops any malformed entries instead of returning a
- * crashy mix. A queue item is valid only if it has a non-empty string `id`
- * and a string `text`. `createdAt` is repaired to Date.now() if missing or
- * non-numeric.
- *
- * Why: hand-edits or partial file corruption can leave entries with
- * undefined fields, and the webview crashes when it tries to render a row
- * for an item without an id (the `onclick="steerItem('undefined')"` call
- * looks valid but produces a no-op + console error).
+ * v0.3.0 housekeeping. Remove the leftover stable-path scripts and
+ * legacy native-status files from older versions; rename the legacy
+ * global queue / history to .migrated so they don't clutter ~/.claude/.
+ */
+export function cleanupLegacyArtifacts(currentWorkspace: string): void {
+	// User-submit hook script no longer used.
+	if (fs.existsSync(LEGACY_USER_SUBMIT_HOOK_PATH)) {
+		try { fs.unlinkSync(LEGACY_USER_SUBMIT_HOOK_PATH); } catch (_) { /* noop */ }
+	}
+	// Native-status file (workspace-scoped variants also dropped over time).
+	const wsDir = workspaceDataDir(currentWorkspace);
+	const wsNative = path.join(wsDir, 'native-status.json');
+	if (fs.existsSync(wsNative)) {
+		try { fs.unlinkSync(wsNative); } catch (_) { /* noop */ }
+	}
+	const wsUserSubmit = path.join(wsDir, 'user-submit.json');
+	if (fs.existsSync(wsUserSubmit)) {
+		try { fs.unlinkSync(wsUserSubmit); } catch (_) { /* noop */ }
+	}
+	// Global legacy native-status (v0.2.7 only).
+	if (fs.existsSync(LEGACY_NATIVE_STATUS_FILE)) {
+		try { fs.renameSync(LEGACY_NATIVE_STATUS_FILE, LEGACY_NATIVE_STATUS_FILE + '.migrated'); } catch (_) { /* noop */ }
+	}
+}
+
+/**
+ * Legacy migration from v0.2.7 globals to per-workspace.
+ */
+export function migrateLegacyGlobalQueue(currentWorkspace: string): { itemsMigrated: number; historyMigrated: number } {
+	let itemsMigrated = 0;
+	let historyMigrated = 0;
+	const paths = getPathsForWorkspace(currentWorkspace);
+
+	if (fs.existsSync(LEGACY_QUEUE_FILE)) {
+		try {
+			const legacy = JSON.parse(fs.readFileSync(LEGACY_QUEUE_FILE, 'utf8'));
+			if (Array.isArray(legacy) && legacy.length > 0) {
+				const existing = loadQueueFromFile(paths.queueFile);
+				saveQueueToFile(paths.queueFile, [...existing, ...legacy]);
+				itemsMigrated = legacy.length;
+			}
+		} catch (_) { /* corrupt → ignore */ }
+		try { fs.renameSync(LEGACY_QUEUE_FILE, LEGACY_QUEUE_FILE + '.migrated'); } catch (_) { /* noop */ }
+	}
+
+	if (fs.existsSync(LEGACY_HISTORY_FILE)) {
+		try {
+			const legacy = JSON.parse(fs.readFileSync(LEGACY_HISTORY_FILE, 'utf8'));
+			if (Array.isArray(legacy) && legacy.length > 0) {
+				const existing = loadHistoryFromFile(paths.historyFile);
+				atomicWriteFile(paths.historyFile, JSON.stringify([...existing, ...legacy].slice(-50), null, 2));
+				historyMigrated = legacy.length;
+			}
+		} catch (_) { /* corrupt → ignore */ }
+		try { fs.renameSync(LEGACY_HISTORY_FILE, LEGACY_HISTORY_FILE + '.migrated'); } catch (_) { /* noop */ }
+	}
+
+	return { itemsMigrated, historyMigrated };
+}
+
+/**
+ * Loads the queue with integrity validation — drops entries missing
+ * required fields (id, text) and repairs missing createdAt to Date.now().
  */
 export function loadQueueFromFile(queueFile: string): QueueItem[] {
 	if (!fs.existsSync(queueFile)) { return []; }
@@ -320,56 +314,4 @@ export function loadHistoryFromFile(historyFile: string): HistoryEntry[] {
 		if (Array.isArray(parsed)) { return parsed; }
 	} catch (_) { /* fall through */ }
 	return [];
-}
-
-export function loadNativeStatus(statusFile: string): NativeStatus | null {
-	if (!fs.existsSync(statusFile)) { return null; }
-	try {
-		const parsed = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
-		if (parsed && typeof parsed.at === 'number') { return parsed as NativeStatus; }
-	} catch (_) { /* fall through */ }
-	return null;
-}
-
-/**
- * One-time migration: if the legacy global queue/history files from v0.2.7
- * exist, merge their contents into the current workspace's per-workspace
- * files and rename the legacy files so we never migrate twice.
- *
- * Returns the number of items migrated (0 if no migration happened).
- */
-export function migrateLegacyGlobalQueue(currentWorkspace: string): { itemsMigrated: number; historyMigrated: number } {
-	let itemsMigrated = 0;
-	let historyMigrated = 0;
-	const paths = getPathsForWorkspace(currentWorkspace);
-
-	if (fs.existsSync(LEGACY_QUEUE_FILE)) {
-		try {
-			const legacy = JSON.parse(fs.readFileSync(LEGACY_QUEUE_FILE, 'utf8'));
-			if (Array.isArray(legacy) && legacy.length > 0) {
-				const existing = loadQueueFromFile(paths.queueFile);
-				saveQueueToFile(paths.queueFile, [...existing, ...legacy]);
-				itemsMigrated = legacy.length;
-			}
-		} catch (_) { /* corrupt → ignore */ }
-		try { fs.renameSync(LEGACY_QUEUE_FILE, LEGACY_QUEUE_FILE + '.migrated'); } catch (_) { /* noop */ }
-	}
-
-	if (fs.existsSync(LEGACY_HISTORY_FILE)) {
-		try {
-			const legacy = JSON.parse(fs.readFileSync(LEGACY_HISTORY_FILE, 'utf8'));
-			if (Array.isArray(legacy) && legacy.length > 0) {
-				const existing = loadHistoryFromFile(paths.historyFile);
-				atomicWriteFile(paths.historyFile, JSON.stringify([...existing, ...legacy].slice(-50), null, 2));
-				historyMigrated = legacy.length;
-			}
-		} catch (_) { /* corrupt → ignore */ }
-		try { fs.renameSync(LEGACY_HISTORY_FILE, LEGACY_HISTORY_FILE + '.migrated'); } catch (_) { /* noop */ }
-	}
-
-	if (fs.existsSync(LEGACY_NATIVE_STATUS_FILE)) {
-		try { fs.renameSync(LEGACY_NATIVE_STATUS_FILE, LEGACY_NATIVE_STATUS_FILE + '.migrated'); } catch (_) { /* noop */ }
-	}
-
-	return { itemsMigrated, historyMigrated };
 }

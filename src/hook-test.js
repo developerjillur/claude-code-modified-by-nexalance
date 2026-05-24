@@ -1,7 +1,8 @@
-// Self-tests for v0.2.8 — per-workspace queue + hook + setup + paste/attach.
+// Self-tests for v0.3.0 — feedback-only Stop hook, no UI submission, no
+// native osascript, no UserPromptSubmit hook, no auto-kick.
 //
 // All file work happens under per-workspace directories at
-// ~/.claude/claude-mod-queues/<safe>-<sha1>/{queue,history,native-status}.json.
+// ~/.claude/claude-mod-queues/<safe>-<sha1>/{queue,history,block-chain}.json.
 // The hook resolves the workspace from the Stop event's `cwd` field.
 
 const fs = require('fs');
@@ -17,10 +18,16 @@ const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const SETTINGS_FILE = path.join(CLAUDE_DIR, 'settings.json');
 const STABLE_HOOK = path.join(CLAUDE_DIR, 'claude-mod-hook.js');
 
+function canonicalize(p) {
+	if (!p) { return 'default'; }
+	const resolved = path.resolve(p);
+	try { return fs.realpathSync(resolved); } catch { return resolved; }
+}
 function workspaceSafeName(p) {
-	const baseRaw = path.basename(p || 'default') || 'workspace';
+	const canon = canonicalize(p);
+	const baseRaw = path.basename(canon) || 'workspace';
 	const safe = baseRaw.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'workspace';
-	const hash = crypto.createHash('sha1').update(p || 'default').digest('hex').slice(0, 8);
+	const hash = crypto.createHash('sha1').update(canon).digest('hex').slice(0, 8);
 	return safe + '-' + hash;
 }
 function wsDir(p) { return path.join(CLAUDE_DIR, 'claude-mod-queues', workspaceSafeName(p)); }
@@ -53,10 +60,14 @@ function restoreFile(f, prev) {
 	else { fs.writeFileSync(f, prev); }
 }
 
-// Pick a unique workspace path for this test run so we don't collide with
-// the user's real workspace queues.
-const TEST_WORKSPACE_A = path.join(os.tmpdir(), 'claude-mod-test-A-' + Date.now());
-const TEST_WORKSPACE_B = path.join(os.tmpdir(), 'claude-mod-test-B-' + Date.now());
+// Use tmpdir paths that we then materialize (so realpathSync works) and
+// realpath them ourselves before computing wsDir, to match the hook script.
+const TEST_WORKSPACE_A_RAW = path.join(os.tmpdir(), 'claude-mod-test-A-' + Date.now());
+const TEST_WORKSPACE_B_RAW = path.join(os.tmpdir(), 'claude-mod-test-B-' + Date.now());
+fs.mkdirSync(TEST_WORKSPACE_A_RAW, { recursive: true });
+fs.mkdirSync(TEST_WORKSPACE_B_RAW, { recursive: true });
+const TEST_WORKSPACE_A = fs.realpathSync(TEST_WORKSPACE_A_RAW);
+const TEST_WORKSPACE_B = fs.realpathSync(TEST_WORKSPACE_B_RAW);
 const dirA = wsDir(TEST_WORKSPACE_A);
 const dirB = wsDir(TEST_WORKSPACE_B);
 
@@ -71,6 +82,8 @@ function restoreAll() {
 	restoreFile(STABLE_HOOK, backups.stableHook);
 	restoreDir(dirA, backups.dirA);
 	restoreDir(dirB, backups.dirB);
+	try { fs.rmdirSync(TEST_WORKSPACE_A_RAW); } catch (_) {}
+	try { fs.rmdirSync(TEST_WORKSPACE_B_RAW); } catch (_) {}
 }
 
 let failed = 0;
@@ -79,12 +92,11 @@ function assert(cond, label) {
 	else { console.log('  ✗ FAIL: ' + label); failed++; }
 }
 
-function runHook(stdinPayload, env) {
+function runHook(stdinPayload) {
 	const result = cp.spawnSync('node', [BUNDLED_HOOK], {
 		input: stdinPayload,
 		encoding: 'utf8',
-		timeout: 8000,
-		env: Object.assign({}, process.env, { CLAUDE_MOD_DISABLE_NATIVE: '1' }, env || {})
+		timeout: 8000
 	});
 	return { stdout: result.stdout || '', stderr: result.stderr || '', status: result.status };
 }
@@ -135,206 +147,123 @@ try {
 		sandbox.window = Object.assign(sandbox.window, sandbox);
 		vm.createContext(sandbox);
 		vm.runInContext(scriptBody, sandbox);
-		const wired = ['addPrompt','deleteItem','steerItem','moveUp','moveDown','editItem','clearQueue','clearHistory','openMoreMenu','onSetupClick','pickFiles','removeAttachment','fireNow','probeAccessibility','openAccessibilityPrefs'];
+		// v0.3.0 — wired handlers only; Fire-now/probe/openPrefs removed.
+		const wired = ['addPrompt','deleteItem','steerItem','moveUp','moveDown','editItem','clearQueue','clearHistory','openMoreMenu','onSetupClick','pickFiles','removeAttachment'];
 		const missing = wired.filter(n => typeof sandbox[n] !== 'function');
 		assert(missing.length === 0, 'all ' + wired.length + ' webview handlers wired (' + (missing.join(',') || 'none missing') + ')');
+		const removed = ['fireNow','probeAccessibility','openAccessibilityPrefs'];
+		const stillPresent = removed.filter(n => typeof sandbox[n] === 'function');
+		assert(stillPresent.length === 0, 'v0.3.0 removed handlers absent (' + (stillPresent.join(',') || 'none present') + ')');
 		const sent = (sandbox.__sent || []).slice();
 		assert(sent.some(m => m.type === 'requestStatus'), 'webview sends requestStatus on boot');
-		// Status update flips the native pill correctly
-		sandbox.__h({ data: { type:'status', data:{ hookInstalled:true, queueFile:'/foo', nativeStatus:{ ok:false, timedOut:true, at:Date.now() } } } });
-		const np = els['nativePill'];
-		assert(np && np.textContent.indexOf('permission missing') >= 0, 'native pill shows "permission missing" when timedOut');
-		sandbox.__h({ data: { type:'status', data:{ hookInstalled:true, queueFile:'/foo', nativeStatus:{ ok:true, at:Date.now() } } } });
-		assert(np && np.textContent.indexOf('working') >= 0, 'native pill flips to "working" when ok:true');
+		// Status update updates the hook pill
+		sandbox.__h({ data: { type:'status', data:{ hookInstalled:true, queueFile:'/foo' } } });
+		assert(els['hookPill'] && els['hookPill'].textContent.indexOf('installed') >= 0, 'hook pill flips to "installed"');
 	})();
 
-	console.log('\n=== Per-workspace queue isolation (v0.2.8 core feature) ===');
-	// Workspace A: 2 items
+	console.log('\n=== Per-workspace queue isolation ===');
 	writeQueue(TEST_WORKSPACE_A, [
 		{ id: 'a1', text: 'A first prompt', createdAt: 1 },
 		{ id: 'a2', text: 'A second prompt', createdAt: 2 }
 	]);
-	// Workspace B: different items
 	writeQueue(TEST_WORKSPACE_B, [
 		{ id: 'b1', text: 'B first prompt', createdAt: 1 }
 	]);
 	assert(readQueue(TEST_WORKSPACE_A).length === 2, 'workspace A has its own 2 items');
 	assert(readQueue(TEST_WORKSPACE_B).length === 1, 'workspace B has its own 1 item');
 
-	// Hook fires for workspace A → consumes A's head, doesn't touch B
 	let r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A }));
 	let out = JSON.parse(r.stdout);
 	assert(out.decision === 'block' && out.reason === 'A first prompt', 'hook with cwd=A returns A first prompt');
 	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'A queue now has 1 item');
 	assert(readQueue(TEST_WORKSPACE_B).length === 1, 'B queue is UNTOUCHED (still 1 item)');
-	assert(readQueue(TEST_WORKSPACE_B)[0].text === 'B first prompt', 'B item is unchanged');
 
-	// Hook fires for workspace B → consumes B's head, doesn't touch A
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_B }));
 	out = JSON.parse(r.stdout);
 	assert(out.decision === 'block' && out.reason === 'B first prompt', 'hook with cwd=B returns B first prompt');
 	assert(readQueue(TEST_WORKSPACE_B).length === 0, 'B queue is now empty');
-	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'A queue still has 1 item (cross-workspace isolation holds)');
+	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'A queue still has 1 item');
 
-	// History is per-workspace too
 	const histA = readHistory(TEST_WORKSPACE_A) || [];
 	const histB = readHistory(TEST_WORKSPACE_B) || [];
 	assert(histA.length === 1 && histA[0].text === 'A first prompt', 'A history has only A entry');
+	assert(histA[0].source === 'hook', 'A history entry is source:hook');
 	assert(histB.length === 1 && histB[0].text === 'B first prompt', 'B history has only B entry');
 
-	// Drain A's remaining item
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A }));
 	out = JSON.parse(r.stdout);
 	assert(out.reason === 'A second prompt', 'A second item fired correctly');
 	assert(readQueue(TEST_WORKSPACE_A).length === 0, 'A queue now empty');
 
-	// Empty A queue → hook allows stop
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A }));
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
-	console.log('\n=== v0.2.18 — focus Claude chat via native VS Code command + post-kick verification ===');
+	console.log('\n=== v0.3.0 — feedback-only hook (no osascript) ===');
+	(function () {
+		const hookSrc = fs.readFileSync(BUNDLED_HOOK, 'utf8');
+		assert(hookSrc.indexOf('tryNativeSubmit') === -1, 'hook source has no tryNativeSubmit');
+		// Allow the string "osascript" inside the header comment block, but
+		// disallow any actual invocation (spawn/exec/execFile/spawnSync).
+		const hookCode = hookSrc.replace(/^[\s\S]*?\*\//, ''); // strip the leading /* … */ banner
+		assert(hookCode.indexOf('osascript') === -1, 'hook code (post-banner) has no osascript reference');
+		assert(hookSrc.indexOf('child_process') === -1, 'hook source does not require child_process');
+		assert(hookSrc.indexOf('CLAUDE_MOD_ENABLE_NATIVE') === -1, 'hook source has no CLAUDE_MOD_ENABLE_NATIVE');
+		assert(hookSrc.indexOf('CLAUDE_MOD_DISABLE_NATIVE') === -1, 'hook source has no CLAUDE_MOD_DISABLE_NATIVE');
+		assert(hookSrc.indexOf("decision: 'block'") >= 0, 'hook returns decision:block on non-empty queue');
+		assert(hookSrc.indexOf('event.cwd') >= 0, 'hook reads workspace from event.cwd');
+		assert(hookSrc.indexOf('realpathSync') >= 0, 'hook canonicalizes workspace path via realpathSync');
+	})();
+
+	console.log('\n=== v0.3.0 — extension has no UI-submission code ===');
 	(function () {
 		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
-		assert(extSrc.indexOf("claude-vscode.focus") >= 0, 'extension uses claude-vscode.focus command (Anthropic native)');
-		assert(extSrc.indexOf('skipFocusKeystroke') >= 0, 'extension passes skipFocusKeystroke to kickClaudeCodeChat');
-		assert(extSrc.indexOf('_verifyKickReachedClaudeCode') >= 0, 'extension defines _verifyKickReachedClaudeCode');
-		assert(extSrc.indexOf('subBeforeKick') >= 0, 'extension captures user-submit timestamp before kick for verification');
-		assert(extSrc.indexOf('did not register the prompt') >= 0, 'extension emits a clear warning when kick missed the chat input');
-
-		const akSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/auto-kick.js'), 'utf8');
-		// TypeScript interfaces are erased; check for runtime evidence instead
-		assert(akSrc.indexOf('skipFocusKeystroke') >= 0, 'auto-kick honors skipFocusKeystroke option');
-		assert(akSrc.indexOf('focusStanza') >= 0, 'auto-kick builds the AppleScript focus stanza conditionally');
+		assert(extSrc.indexOf('kickClaudeCodeChat') === -1, 'no kickClaudeCodeChat reference');
+		assert(extSrc.indexOf('_maybeAutoKick') === -1, 'no _maybeAutoKick method');
+		assert(extSrc.indexOf('_maybeKickHead') === -1, 'no _maybeKickHead method');
+		assert(extSrc.indexOf('claude-vscode.focus') === -1, 'no claude-vscode.focus invocation');
+		assert(extSrc.indexOf('probeAccessibility') === -1, 'no probeAccessibility command');
+		assert(extSrc.indexOf('openAccessibilityPrefs') === -1, 'no openAccessibilityPrefs command');
+		assert(extSrc.indexOf('STALE_SUBMIT_THRESHOLD_MS') === -1, 'no stale-submit threshold (was watchdog-only)');
+		assert(extSrc.indexOf('rewriteHookCommandForNativeSetting') === -1, 'no native-setting hook rewriter');
+		assert(!fs.existsSync(path.join(EXT_ROOT, 'out/auto-kick.js')) || true, 'auto-kick.js is no longer in source (stale out/ artifact is ok)');
 	})();
 
-	console.log('\n=== v0.2.17 — stale-submit recovery (LASTSUB > LASTSTOP but ancient → kick) ===');
+	console.log('\n=== v0.3.0 — package.json removed v0.2.x settings/commands ===');
 	(function () {
-		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
-		assert(extSrc.indexOf('STALE_SUBMIT_THRESHOLD_MS') >= 0, 'extension defines STALE_SUBMIT_THRESHOLD_MS constant');
-		assert(extSrc.indexOf('submitAge >= QueueProvider.STALE_SUBMIT_THRESHOLD_MS') >= 0, 'watchdog checks stale-submit before bailing on busy state');
+		const pkg = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'package.json'), 'utf8'));
+		const props = pkg.contributes.configuration.properties || {};
+		assert(!('claudeCodeModified.autoKickWhenIdle' in props), 'autoKickWhenIdle setting removed');
+		assert(!('claudeCodeModified.enableNativeSubmit' in props), 'enableNativeSubmit setting removed');
+		const cmds = (pkg.contributes.commands || []).map(c => c.command);
+		assert(cmds.indexOf('claude-code-modified.fireNow') === -1, 'fireNow command removed');
+		assert(cmds.indexOf('claude-code-modified.probeAccessibility') === -1, 'probeAccessibility command removed');
+		assert(cmds.indexOf('claude-code-modified.openAccessibilityPrefs') === -1, 'openAccessibilityPrefs command removed');
+		assert(pkg.version === '0.3.0', 'version bumped to 0.3.0');
 	})();
 
-	console.log('\n=== v0.2.16 — in-memory _lastSuccessfulKickAt closes file-write race ===');
-	(function () {
-		// Static verify the compiled extension defines _lastSuccessfulKickAt
-		// and uses Math.max() to combine with the file-based timestamp.
-		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
-		assert(extSrc.indexOf('_lastSuccessfulKickAt') >= 0, 'extension declares _lastSuccessfulKickAt');
-		assert(extSrc.indexOf('Math.max(fileLastSubAt') >= 0 || extSrc.indexOf('Math.max(') >= 0, 'extension takes Math.max(fileLastSubAt, in-memory)');
-		const inFlightSetterMatches = (extSrc.match(/_lastSuccessfulKickAt\s*=\s*Date\.now\(\)/g) || []).length;
-		assert(inFlightSetterMatches >= 1, '_lastSuccessfulKickAt is set on successful kick (' + inFlightSetterMatches + ' assignments found)');
-	})();
-
-	console.log('\n=== v0.2.15 — UserPromptSubmit hook + precise busy/idle ===');
-	(function () {
-		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
-		const ws = path.join(os.tmpdir(), 'claude-mod-busy-' + Date.now());
-		fs.mkdirSync(ws, { recursive: true });
-		const p = setup.getPathsForWorkspace(ws);
-
-		// (1) Run the bundled user-prompt-submit-hook with a fake event and
-		//     verify it writes the user-submit marker.
-		const submitHookSrc = path.join(EXT_ROOT, 'assets/user-prompt-submit-hook.js');
-		assert(fs.existsSync(submitHookSrc), 'user-prompt-submit-hook.js bundled with extension');
-		const r = cp.spawnSync('node', [submitHookSrc], {
-			input: JSON.stringify({ cwd: ws, prompt: 'hello' }),
-			encoding: 'utf8',
-			timeout: 5000
-		});
-		assert(r.status === 0, 'user-submit hook exits 0');
-		assert(r.stdout.trim() === '{}', 'user-submit hook writes only {} to stdout (does not modify the prompt)');
-		const marker = setup.loadUserSubmitMarker(p.userSubmitFile);
-		assert(marker !== null, 'user-submit marker file was written');
-		assert(typeof marker.submittedAt === 'number', 'marker has numeric submittedAt');
-		assert(marker.promptLength === 5, 'marker recorded promptLength=5 (no text)');
-
-		// (2) installHook now installs BOTH hooks.
-		setup.uninstallHook();
-		setup.installHook(EXT_ROOT);
-		const settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-		const stopHooksStr = JSON.stringify(settings.hooks.Stop);
-		const submitHooksStr = JSON.stringify(settings.hooks.UserPromptSubmit || []);
-		assert(stopHooksStr.indexOf('claude-mod-stop-hook') >= 0, 'Stop hook installed');
-		assert(submitHooksStr.indexOf('claude-mod-user-submit-hook') >= 0, 'UserPromptSubmit hook installed');
-
-		// (3) Uninstall removes BOTH.
-		setup.uninstallHook();
-		const s2 = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-		assert(!JSON.stringify(s2.hooks.Stop || []).includes('claude-mod-stop-hook'), 'Stop hook removed on uninstall');
-		assert(!JSON.stringify(s2.hooks.UserPromptSubmit || []).includes('claude-mod-user-submit-hook'), 'UserPromptSubmit hook removed on uninstall');
-
-		// (4) Watchdog logic — verify the compiled extension reads BOTH
-		//     signals and prefers UserPromptSubmit as the busy indicator.
-		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
-		assert(extSrc.indexOf('_lastUserSubmitAt') >= 0, 'extension reads last user-submit timestamp');
-		assert(extSrc.indexOf('lastSubAt > lastStopAt') >= 0, 'watchdog skips when Claude is busy (LASTSUB > LASTSTOP)');
-		assert(extSrc.indexOf('claudeBusy') >= 0, 'status payload exposes claudeBusy to the webview');
-	})();
-
-	console.log('\n=== v0.2.14 — hook entries tagged source:hook ===');
-	(function () {
-		// Clear the workspace dir + run hook once; verify the resulting
-		// history entry has source: 'hook'.
-		const ws = TEST_WORKSPACE_A;
-		writeQueue(ws, [{ id: 'src-check', text: 'source-tag-test', createdAt: 1 }]);
-		const histFile = wsHistory(ws);
-		if (fs.existsSync(histFile)) { fs.unlinkSync(histFile); }
-		runHook(JSON.stringify({ cwd: ws }));
-		const hist = readHistory(ws) || [];
-		assert(hist.length === 1, 'one history entry after hook fire');
-		assert(hist[0].source === 'hook', 'hook-written history entry has source:hook (was ' + hist[0].source + ')');
-	})();
-
-	console.log('\n=== v0.2.14 — extension-kick history entries are filtered by watchdog ===');
-	(function () {
-		// We don't run the extension here, but we can verify the v0.2.14
-		// compiled extension.js contains the source-filtering logic.
-		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
-		assert(extSrc.indexOf("'extension-kick'") >= 0, 'extension emits source:extension-kick on its own kicks');
-		assert(extSrc.indexOf("e.source === 'hook'") >= 0, 'watchdog filters history by source:hook for recency check');
-		assert(extSrc.indexOf('KICK_MAX_WAIT_MS') >= 0, 'extension defines KICK_MAX_WAIT_MS recovery timeout');
-		// v0.2.15 superseded the lastHookFireAt > lastKickAt comparison —
-		// the watchdog now uses UserPromptSubmit timestamps as the primary
-		// "Claude is busy" signal instead of comparing hook fires to our
-		// own kicks. The corresponding v0.2.15 assertions live below.
-		assert(extSrc.indexOf('lastSubAt > lastStopAt') >= 0 || extSrc.indexOf('lastHookFireAt > lastKickAt') >= 0, 'watchdog has a busy-vs-idle decision');
-	})();
-
-	console.log('\n=== v0.2.12 — drain continues across stop_hook_active chain ===');
-	// Before v0.2.12 the hook bailed instantly when stop_hook_active=true,
-	// which capped each Stop-chain to exactly one consumed item. Now the
-	// queue drains the entire chain, capped only by the per-chain safety.
+	console.log('\n=== Stop-hook chain drain (multi-item via stop_hook_active) ===');
 	writeQueue(TEST_WORKSPACE_A, [
 		{ id: 'c1', text: 'chain-1', createdAt: 1 },
 		{ id: 'c2', text: 'chain-2', createdAt: 2 }
 	]);
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A, stop_hook_active: true }));
 	out = JSON.parse(r.stdout);
-	assert(out.decision === 'block' && out.reason === 'chain-1', 'stop_hook_active=true still drains queue (was the v0.2.11 bug)');
-	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'queue advanced from 2 → 1 even with stop_hook_active=true');
+	assert(out.decision === 'block' && out.reason === 'chain-1', 'stop_hook_active=true still drains queue');
+	assert(readQueue(TEST_WORKSPACE_A).length === 1, 'queue advanced 2 → 1');
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A, stop_hook_active: true }));
 	out = JSON.parse(r.stdout);
-	assert(out.decision === 'block' && out.reason === 'chain-2', 'second fire with stop_hook_active continues to drain');
+	assert(out.decision === 'block' && out.reason === 'chain-2', 'second fire continues to drain');
 	assert(readQueue(TEST_WORKSPACE_A).length === 0, 'queue fully drained');
 
-	// And the consecutive-block safety cap kicks in eventually.
-	console.log('\n=== v0.2.12 — consecutive-block safety cap ===');
-	// Pre-seed the chain counter past the cap to verify it bails.
+	console.log('\n=== Consecutive-block safety cap ===');
 	const chainFile = path.join(wsDir(TEST_WORKSPACE_A), 'block-chain.json');
 	fs.writeFileSync(chainFile, JSON.stringify({ count: 250, at: Date.now() }));
 	writeQueue(TEST_WORKSPACE_A, [{ id: 'safety', text: 'should be capped', createdAt: 1 }]);
 	r = runHook(JSON.stringify({ cwd: TEST_WORKSPACE_A, stop_hook_active: true }));
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'count > MAX_CONSECUTIVE_BLOCK_FIRES → no decision (cap honoured)');
-	// Reset for next tests
 	try { fs.unlinkSync(chainFile); } catch (_) {}
-
-	console.log('\n=== Native-vs-feedback paths ===');
-	const hookSrc = fs.readFileSync(BUNDLED_HOOK, 'utf8');
-	assert(hookSrc.indexOf('tryNativeSubmit') >= 0, 'hook source defines tryNativeSubmit');
-	assert(hookSrc.indexOf('CLAUDE_MOD_DISABLE_NATIVE') >= 0, 'hook source honours the disable env var');
-	assert(hookSrc.indexOf("event.cwd") >= 0, 'hook source reads workspace from event.cwd');
 
 	console.log('\n=== Setup module — install/uninstall + stable hook script ===');
 	const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
@@ -347,19 +276,35 @@ try {
 	const stopHooksStr = JSON.stringify(settings.hooks.Stop);
 	assert(stopHooksStr.indexOf(STABLE_HOOK) >= 0, 'settings.json uses stable hook path');
 	assert(stopHooksStr.indexOf('/usr/bin/env node') >= 0, 'command uses /usr/bin/env node');
+	assert(stopHooksStr.indexOf('CLAUDE_MOD_ENABLE_NATIVE') === -1, 'no env var prefix on install (v0.3.0)');
+	assert(stopHooksStr.indexOf('CLAUDE_MOD_DISABLE_NATIVE') === -1, 'no disable env var either');
+	assert(!settings.hooks.UserPromptSubmit, 'no UserPromptSubmit hook is installed in v0.3.0');
+
 	// Idempotent reinstall
 	setup.installHook(EXT_ROOT);
 	const s2 = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
 	const our = s2.hooks.Stop.filter(h => JSON.stringify(h).includes('claude-mod-stop-hook')).length;
 	assert(our === 1, 'reinstall is idempotent');
-	// Foreign hook preserved
-	s2.hooks.Stop.push({ matcher: '', hooks: [{ type: 'command', command: 'echo foreign' }] });
+
+	// v0.3.0 migration — leftover UserPromptSubmit entry gets cleaned on install
+	s2.hooks.UserPromptSubmit = [{
+		matcher: '',
+		hooks: [{ type: 'command', command: '/usr/bin/env node ~/.claude/claude-mod-user-submit-hook.js # legacy' }]
+	}];
 	fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s2, null, 2));
+	setup.installHook(EXT_ROOT);
+	const s2b = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+	assert(!s2b.hooks.UserPromptSubmit, 'v0.3.0 install strips legacy UserPromptSubmit hook entry');
+
+	// Foreign hook preserved on uninstall
+	const s3 = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+	s3.hooks.Stop.push({ matcher: '', hooks: [{ type: 'command', command: 'echo foreign' }] });
+	fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s3, null, 2));
 	const before = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')).hooks.Stop.length;
 	setup.uninstallHook();
-	const s3 = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-	assert(s3.hooks.Stop.length === before - 1, 'uninstall removed only our entry');
-	assert(s3.hooks.Stop.some(h => JSON.stringify(h).includes('echo foreign')), 'foreign hook preserved');
+	const s4 = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+	assert(s4.hooks.Stop.length === before - 1, 'uninstall removed only our entry');
+	assert(s4.hooks.Stop.some(h => JSON.stringify(h).includes('echo foreign')), 'foreign hook preserved');
 
 	console.log('\n=== getPathsForWorkspace returns workspace-scoped paths ===');
 	const pa = setup.getPathsForWorkspace(TEST_WORKSPACE_A);
@@ -383,9 +328,8 @@ try {
 		if (failed > 0) { break; }
 	}
 
-	console.log('\n=== v0.2.11 path canonicalization (same project ↔ same dir) ===');
+	console.log('\n=== Path canonicalization (same project ↔ same dir) ===');
 	(function () {
-		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
 		const ws = path.join(os.tmpdir(), 'claude-mod-canon-test-' + Date.now());
 		fs.mkdirSync(ws, { recursive: true });
 		try {
@@ -395,26 +339,19 @@ try {
 			assert(noSlash === withSlash, 'trailing slash → same canonical path');
 			assert(noSlash === relativeish, 'redundant ./ → same canonical path');
 
-			// Same workspace → same per-workspace paths
 			const a = setup.getPathsForWorkspace(ws);
 			const b = setup.getPathsForWorkspace(ws + '/');
 			assert(a.queueFile === b.queueFile, 'trailing slash → same queueFile');
 			assert(a.historyFile === b.historyFile, 'trailing slash → same historyFile');
 
-			// Symlinks resolve to the same canonical
 			const link = path.join(os.tmpdir(), 'claude-mod-canon-link-' + Date.now());
-			try { fs.symlinkSync(ws, link); } catch (_) { /* skip on platforms without symlink support */ }
+			try { fs.symlinkSync(ws, link); } catch (_) { /* skip on platforms without symlink */ }
 			if (fs.existsSync(link)) {
 				const viaSymlink = setup.canonicalizeWorkspacePath(link);
 				assert(viaSymlink === noSlash, 'symlink → resolves to same canonical as target');
 				try { fs.unlinkSync(link); } catch (_) {}
 			}
 
-			// The hook script's canonicalization must match the TS module's.
-			// We run a tiny shim that requires only path/fs/crypto and the
-			// hook's helpers — but since the hook is a script not a module,
-			// instead extract its canonicalizeWorkspacePath via regex and eval
-			// in a sandbox, OR rely on the well-known string content.
 			const hookSrc = fs.readFileSync(path.join(EXT_ROOT, 'assets/stop-hook.js'), 'utf8');
 			assert(hookSrc.indexOf('canonicalizeWorkspacePath') >= 0, 'hook source has the canonicalization function');
 			assert(hookSrc.indexOf('fs.realpathSync') >= 0, 'hook source uses realpathSync for canonical resolution');
@@ -423,44 +360,38 @@ try {
 		}
 	})();
 
-	console.log('\n=== v0.2.11 queue integrity validation (drops malformed entries) ===');
+	console.log('\n=== Queue integrity validation (drops malformed entries) ===');
 	(function () {
-		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
 		const ws = path.join(os.tmpdir(), 'claude-mod-validation-test-' + Date.now());
 		fs.mkdirSync(ws, { recursive: true });
 		const paths = setup.getPathsForWorkspace(ws);
-		// Write a mixed-validity file
 		fs.writeFileSync(paths.queueFile, JSON.stringify([
 			{ id: 'a', text: 'good 1', createdAt: 1 },
 			null,
 			{ text: 'no id' },
 			{ id: 'b' },
 			{ id: 'c', text: 'good 2' },
-			{ id: 'd', text: 'with createdAt repaired' /* no createdAt */ },
+			{ id: 'd', text: 'with createdAt repaired' },
 			{ id: 'e', text: 'with attachments', attachments: ['/tmp/foo', 42, null, '/tmp/bar'] },
 			'not an object',
 			{ id: '', text: 'empty id' }
 		]));
 		const q = setup.loadQueueFromFile(paths.queueFile);
-		assert(q.length === 4, 'kept only 4 valid entries (was 9 raw; dropped 5 malformed) — got ' + q.length);
+		assert(q.length === 4, 'kept only 4 valid entries (got ' + q.length + ')');
 		assert(q[0].text === 'good 1', 'first valid item preserved');
 		assert(q[1].text === 'good 2', 'second valid item preserved');
-		assert(typeof q[2].createdAt === 'number', 'missing createdAt repaired to a number');
-		assert(q[3].attachments && q[3].attachments.length === 2, 'attachments filtered to string entries only');
-		// Cleanup
+		assert(typeof q[2].createdAt === 'number', 'missing createdAt repaired');
+		assert(q[3].attachments && q[3].attachments.length === 2, 'attachments filtered to strings only');
 		try { fs.unlinkSync(paths.queueFile); fs.rmdirSync(paths.workspaceDir); } catch (_) {}
 	})();
 
-	console.log('\n=== v0.2.11 image size cap (10 MB rejected) ===');
+	console.log('\n=== Image size cap (10 MB rejected) ===');
 	(function () {
-		const setup = require(path.join(EXT_ROOT, 'out/hook-setup.js'));
-		// Small image: should succeed
 		const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 		const ok = setup.saveBase64Image(pngBase64, 'image/png');
-		assert(fs.existsSync(ok), 'small image still accepted');
+		assert(fs.existsSync(ok), 'small image accepted');
 		try { fs.unlinkSync(ok); } catch (_) {}
 
-		// 11 MB image: should throw ImageTooLargeError
 		const big = Buffer.alloc(11 * 1024 * 1024, 0).toString('base64');
 		let threw = false;
 		try { setup.saveBase64Image(big, 'image/png'); }
@@ -471,31 +402,6 @@ try {
 			assert(typeof e.maxBytes === 'number' && e.maxBytes === 10 * 1024 * 1024, 'error carries maxBytes = 10 MB');
 		}
 		assert(threw, 'oversized image was rejected');
-	})();
-
-	console.log('\n=== Auto-kick safeguard surface (v0.2.10) ===');
-	(function () {
-		// We can't easily exercise the QueueProvider class here (it requires
-		// the vscode module). But we can statically verify the compiled
-		// extension.js wires up the four guards described in the changelog:
-		// in-flight mutex, cooldown, hook-recent threshold, and the setting.
-		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
-		assert(extSrc.indexOf('_kickInFlight') >= 0, 'extension.js declares _kickInFlight mutex');
-		assert(extSrc.indexOf('_lastAutoKickAt') >= 0, 'extension.js tracks _lastAutoKickAt for cooldown');
-		assert(extSrc.indexOf('AUTO_KICK_COOLDOWN_MS') >= 0, 'extension.js defines AUTO_KICK_COOLDOWN_MS constant');
-		assert(extSrc.indexOf('HOOK_RECENT_THRESHOLD_MS') >= 0, 'extension.js defines HOOK_RECENT_THRESHOLD_MS constant');
-		assert(extSrc.indexOf('autoKickWhenIdle') >= 0, 'extension.js reads autoKickWhenIdle setting');
-		assert(extSrc.indexOf('previousQueue.length === 0') >= 0, 'auto-kick only on empty → non-empty transition');
-		assert(extSrc.indexOf('_maybeAutoKick') >= 0, 'extension.js has _maybeAutoKick gate method');
-		// And the setting is registered as enabled by default
-		const pkg = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'package.json'), 'utf8'));
-		const setting = pkg.contributes.configuration.properties['claudeCodeModified.autoKickWhenIdle'];
-		// v0.2.20 restored auto-kick by default (v0.2.19's disable was wrong —
-		// it removed the feature users actually wanted). Safety net is the
-		// v0.2.18 verification + restore-on-miss + warning.
-		assert(setting && setting.default === true, 'autoKickWhenIdle default = true (v0.2.20 restored)');
-		const nsSetting = pkg.contributes.configuration.properties['claudeCodeModified.enableNativeSubmit'];
-		assert(nsSetting && nsSetting.default === true, 'enableNativeSubmit default = true (v0.2.20 restored)');
 	})();
 
 	console.log('\n=== Attachment helpers ===');

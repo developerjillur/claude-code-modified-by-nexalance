@@ -1,13 +1,15 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 // Webview HTML for Claude Mod by NexaLance.
 //
-// v0.2.0 — Queue manager only. NO chat UI. The actual conversation happens in
-// Anthropic's official Claude Code extension. This panel:
+// v0.3.0 — Queue manager only. NO chat UI, NO Fire-now button, NO native
+// submit. The actual conversation happens in Anthropic's official Claude
+// Code extension. This panel:
 //   - lets you type prompts that get appended to a queue file
 //   - shows the queue with per-row Steer / Delete / More actions
 //   - installs a Stop hook into ~/.claude/settings.json that drains the queue
-//     each time Claude finishes a turn — so pending prompts are auto-fed into
-//     the next turn of the current Claude Code session.
+//     each time Claude finishes a turn via decision:block+reason — so each
+//     pending prompt is auto-fed into the next turn of the current Claude
+//     Code session under the "Stop hook feedback:" label.
 
 export function getWebviewHtml(): string {
 	return `<!DOCTYPE html>
@@ -60,41 +62,6 @@ export function getWebviewHtml(): string {
 
 	.chat-area > .status-card:first-child { margin-top: 14px; }
 
-	/* Permission-help inline panel — only visible when nativeStatus is bad */
-	.perm-help {
-		margin: 0 14px 10px 14px;
-		padding: 10px 12px;
-		border-radius: 10px;
-		background: rgba(232,169,81,0.06);
-		border: 1px solid rgba(232,169,81,0.25);
-		color: var(--vscode-foreground, #ddd);
-		font-size: 12px;
-	}
-	.perm-help-title {
-		font-weight: 600;
-		color: #fbbf24;
-		margin-bottom: 6px;
-	}
-	.perm-help-body { line-height: 1.5; }
-	.perm-help-body ol { margin: 6px 0 6px 18px; padding: 0; }
-	.perm-help-body ol li { margin: 3px 0; }
-	.perm-help-body code {
-		background: rgba(255,255,255,0.06);
-		padding: 1px 5px;
-		border-radius: 4px;
-		font-size: 11px;
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	}
-	.perm-help-body .perm-cmd {
-		display: block;
-		margin-top: 6px;
-		padding: 5px 8px;
-		background: rgba(0,0,0,0.25);
-		border-radius: 5px;
-		font-size: 11px;
-		user-select: all;
-	}
-
 	.status-card {
 		margin: 0 14px 10px 14px;
 		padding: 10px 12px;
@@ -136,17 +103,6 @@ export function getWebviewHtml(): string {
 	}
 	.setup-btn:hover { background: linear-gradient(135deg, #34d399 0%, #10b981 100%); }
 	.setup-btn.removing { background: rgba(255,255,255,0.08); color: #f87171; }
-	.probe-btn {
-		background: transparent;
-		color: var(--vscode-descriptionForeground, #999);
-		border: 1px solid rgba(255,255,255,0.1);
-		padding: 6px 11px;
-		border-radius: 7px;
-		cursor: pointer;
-		font-size: 11.5px;
-	}
-	.probe-btn:hover { background: rgba(255,255,255,0.06); color: var(--vscode-foreground, #ddd); }
-	.status-pill.warn { background: rgba(232,169,81,0.10); color: #fbbf24; border: 1px solid rgba(232,169,81,0.30); }
 
 	.chat-area {
 		flex: 1;
@@ -217,40 +173,6 @@ export function getWebviewHtml(): string {
 		opacity: 0.6;
 	}
 	.queue-clear:hover { opacity: 1; background: rgba(255,255,255,0.06); }
-	.queue-fire {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-		color: #fff;
-		border: none;
-		border-radius: 6px;
-		padding: 3px 9px;
-		font-size: 10.5px;
-		font-weight: 600;
-		cursor: pointer;
-	}
-	.queue-fire:hover { background: linear-gradient(135deg, #34d399 0%, #10b981 100%); }
-	.queue-fire:disabled {
-		background: rgba(255,255,255,0.08);
-		color: rgba(255,255,255,0.4);
-		cursor: not-allowed;
-	}
-	.queue-fire.in-flight {
-		background: rgba(16,185,129,0.30);
-		color: rgba(255,255,255,0.85);
-		cursor: progress;
-	}
-	.queue-fire .spinner {
-		display: inline-block;
-		width: 10px;
-		height: 10px;
-		border: 1.5px solid rgba(255,255,255,0.4);
-		border-top-color: #fff;
-		border-radius: 50%;
-		animation: spinClaudeMod 0.8s linear infinite;
-	}
-	@keyframes spinClaudeMod { to { transform: rotate(360deg); } }
 	.queue-list {
 		display: flex; flex-direction: column;
 		overflow-y: auto; max-height: 260px;
@@ -500,7 +422,7 @@ export function getWebviewHtml(): string {
 	<div class="app-header">
 		<span class="app-title">Claude Mod <small>by NexaLance</small></span>
 		<span class="id-pill" title="This is the Claude Mod queue manager. The actual Claude Code chat happens in Anthropic's official extension. This panel only manages the pending queue and feeds prompts via the Stop hook.">
-			<span class="dot"></span>v0.2.20 · Auto-kick + verify
+			<span class="dot"></span>v0.3.0 · Stop-hook only
 		</span>
 	</div>
 
@@ -511,10 +433,6 @@ export function getWebviewHtml(): string {
 				<span class="status-pill bad" id="hookPill">checking…</span>
 			</div>
 			<div class="status-row">
-				<span class="label">Native submit</span>
-				<span class="status-pill bad" id="nativePill" title="Whether osascript can drive Anthropic's chat — requires macOS Accessibility / Automation permission for VS Code">unknown</span>
-			</div>
-			<div class="status-row">
 				<span class="label">Queue file</span>
 				<span class="value" id="queueFileLabel">—</span>
 			</div>
@@ -523,28 +441,6 @@ export function getWebviewHtml(): string {
 					<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
 					<span id="setupBtnLabel">Install hook</span>
 				</button>
-				<button class="probe-btn" onclick="probeAccessibility()" title="Run a tiny osascript probe to check (or trigger) the Accessibility permission for VS Code">
-					Probe native
-				</button>
-				<button class="probe-btn" onclick="openAccessibilityPrefs()" title="Open System Settings → Privacy & Security → Automation so you can grant VS Code permission to control System Events">
-					Open prefs
-				</button>
-			</div>
-		</div>
-
-		<!-- Permission help — shown only when native submit is failing. -->
-		<div class="perm-help" id="permHelp" style="display:none">
-			<div class="perm-help-title">⚠ Native submit blocked by macOS</div>
-			<div class="perm-help-body">
-				Each fed prompt currently shows under <code>Stop hook feedback:</code> because VS Code can't drive Claude's chat input. To get native user-message look:
-				<ol>
-					<li>Click <b>Open prefs</b> above — System Settings opens to <b>Privacy & Security → Automation</b>.</li>
-					<li>Find <b>Visual Studio Code</b> in the list. If it's not there yet, click <b>Probe native</b> first — that triggers macOS to add it.</li>
-					<li>Expand the Visual Studio Code row and turn on <b>System Events</b>.</li>
-					<li>Come back and click <b>Probe native</b> — the pill above should flip to <code>✓ working</code>.</li>
-				</ol>
-				If the pill still says <code>permission missing</code> after enabling, reset and retry:
-				<code class="perm-cmd">tccutil reset AppleEvents com.microsoft.VSCode</code>
 			</div>
 		</div>
 
@@ -552,10 +448,6 @@ export function getWebviewHtml(): string {
 			<div class="queue-header">
 				<span class="queue-status" id="queueStatus">0 pending</span>
 				<span class="header-spacer" style="flex:1"></span>
-				<button class="queue-fire" id="queueFireBtn" onclick="fireNow()" title="Push the head pending prompt into Claude's chat now (requires macOS Accessibility permission for VS Code on first run)">
-					<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-					<span>Fire now</span>
-				</button>
 				<button class="queue-clear" onclick="clearQueue()" title="Remove all pending prompts">Clear all</button>
 			</div>
 			<div class="queue-empty" id="queueEmpty">No pending prompts yet. Type below and press Enter to add one.</div>
@@ -590,7 +482,7 @@ export function getWebviewHtml(): string {
 			</button>
 		</div>
 		<div class="bottom-bar">
-			<span>Queue is synced to <code id="queuePathInline" style="opacity:0.8">~/.claude/claude-mod-queue.json</code></span>
+			<span>Queue is synced to <code id="queuePathInline" style="opacity:0.8">~/.claude/claude-mod-queues/&lt;workspace&gt;/queue.json</code></span>
 		</div>
 	</div>
 
@@ -771,10 +663,6 @@ export function getWebviewHtml(): string {
 		persist();
 	}
 
-	function fireNow() {
-		vscode.postMessage({ type: 'fireNow' });
-	}
-
 	function clearHistory() {
 		history = [];
 		renderHistory();
@@ -819,15 +707,12 @@ export function getWebviewHtml(): string {
 
 	function renderQueue() {
 		queueStatus.textContent = queue.length + ' pending';
-		const fireBtn = document.getElementById('queueFireBtn');
 		if (queue.length === 0) {
 			queueEmpty.style.display = 'block';
 			queueList.innerHTML = '';
-			if (fireBtn) { fireBtn.disabled = true; fireBtn.style.display = 'none'; }
 			return;
 		}
 		queueEmpty.style.display = 'none';
-		if (fireBtn) { fireBtn.disabled = false; fireBtn.style.display = 'inline-flex'; }
 		const rows = queue.map((item, index) => {
 			const preview = item.text.length > 160 ? item.text.slice(0, 160) + '…' : item.text;
 			const isHead = index === 0;
@@ -956,14 +841,6 @@ export function getWebviewHtml(): string {
 		}
 	}
 
-	function probeAccessibility() {
-		vscode.postMessage({ type: 'probeAccessibility' });
-	}
-
-	function openAccessibilityPrefs() {
-		vscode.postMessage({ type: 'openAccessibilityPrefs' });
-	}
-
 	function updateStatus(s) {
 		hookInstalled = !!s.hookInstalled;
 		if (hookInstalled) {
@@ -980,27 +857,6 @@ export function getWebviewHtml(): string {
 		if (s.queueFile) {
 			queueFileLabel.textContent = shortPath(s.queueFile);
 			queuePathInline.textContent = shortPath(s.queueFile);
-		}
-		// Native submit pill — tri-state: ok / failing / unknown
-		const nativePill = document.getElementById('nativePill');
-		const permHelp = document.getElementById('permHelp');
-		if (nativePill) {
-			const ns = s.nativeStatus;
-			let needsHelp = false;
-			if (!ns) {
-				nativePill.className = 'status-pill warn';
-				nativePill.textContent = 'unknown — click Probe';
-			} else if (ns.ok) {
-				nativePill.className = 'status-pill ok';
-				nativePill.textContent = '✓ working';
-			} else {
-				nativePill.className = 'status-pill bad';
-				nativePill.textContent = ns.timedOut ? '✗ permission missing' : '✗ failing';
-				needsHelp = true;
-			}
-			if (permHelp) {
-				permHelp.style.display = needsHelp ? 'block' : 'none';
-			}
 		}
 	}
 
@@ -1066,9 +922,6 @@ export function getWebviewHtml(): string {
 	window.onSetupClick = onSetupClick;
 	window.pickFiles = pickFiles;
 	window.removeAttachment = removeAttachment;
-	window.fireNow = fireNow;
-	window.probeAccessibility = probeAccessibility;
-	window.openAccessibilityPrefs = openAccessibilityPrefs;
 
 	window.addEventListener('message', (e) => {
 		const msg = e.data;
@@ -1095,19 +948,6 @@ export function getWebviewHtml(): string {
 			case 'fileAttached':
 				if (msg.data && msg.data.path) { attachPath(msg.data.path); }
 				break;
-			case 'kickInFlight': {
-				const fireBtn = document.getElementById('queueFireBtn');
-				if (fireBtn) {
-					if (msg.data && msg.data.active) {
-						fireBtn.classList.add('in-flight');
-						fireBtn.innerHTML = '<span class="spinner"></span><span>Firing…</span>';
-					} else {
-						fireBtn.classList.remove('in-flight');
-						fireBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg><span>Fire now</span>';
-					}
-				}
-				break;
-			}
 		}
 	});
 

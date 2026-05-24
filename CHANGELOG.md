@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.3.0] - 2026-05-24 — Drop osascript native submit entirely; Stop-hook is the only path
+
+### The honest summary
+
+After 16+ versions trying to make osascript-driven "type into Claude's chat" reliable, the underlying problem never went away: **Claude Code's webview React handler does not honor synthesized Enter keys**. Paste lands in the input box, then sits there unsubmitted — silently. Every fix (focus via `claude-vscode.focus`, double-Enter, paste-to-Enter gap, post-kick verification, restore-on-miss) addressed real symptoms but never the root cause, because the root cause is outside our process.
+
+v0.3.0 abandons that approach. The Stop hook returns `{decision: "block", reason: <prompt>}` — the design from v0.2.0 that always worked. Each queued prompt arrives inside Claude Code's own process under the cosmetic `"Stop hook feedback:"` label. The label is harmless; the prompt itself is fully processed as instructions and Claude acts on it.
+
+### Removed (UI submit path, gone entirely)
+
+- `claudeCodeModified.autoKickWhenIdle` — setting deleted
+- `claudeCodeModified.enableNativeSubmit` — setting deleted
+- `claude-code-modified.fireNow` — command deleted
+- `claude-code-modified.probeAccessibility` — command deleted
+- `claude-code-modified.openAccessibilityPrefs` — command deleted
+- `src/auto-kick.ts` — file deleted (osascript driver)
+- `assets/user-prompt-submit-hook.js` — file deleted (busy-state marker)
+- `~/.claude/claude-mod-user-submit-hook.js` — auto-removed on upgrade
+- `UserPromptSubmit` hook entry in `~/.claude/settings.json` — auto-removed on upgrade
+- Per-workspace `native-status.json` and `user-submit.json` files — auto-removed
+- Fire-now button, native pill, Probe-native button, Open-prefs button, permission-help card — all removed from the webview
+- Auto-kick `setInterval` watchdog, kick-in-flight mutex, stale-submit recovery, verification polling, focus-via-`claude-vscode.focus` call — all removed from the extension host
+
+### Kept (everything else that was already working)
+
+- Per-workspace queues (`~/.claude/claude-mod-queues/<basename>-<sha1[0..8]>/`)
+- Path canonicalization (`path.resolve` + `fs.realpathSync`) for trailing-slash + symlink consistency
+- Atomic file writes (`write-tmp` + `rename`)
+- Source-tagged history (`source: 'hook'` — the only source now)
+- Consecutive-block chain counter (cap at 200 fires per 5-min window) as a last-resort safety
+- Stable hook script at `~/.claude/claude-mod-hook.js` (survives extension upgrades)
+- Image-paste attachments + 10 MB cap
+- File-attachment picker
+- Queue UI with Steer / Move-up / Move-down / Edit / Cancel actions
+- Auto-migration of legacy v0.2.7 global queue
+- Auto-cleanup of v0.2.15+ user-submit hook entries on upgrade
+- Stop-hook command in `settings.json` automatically re-installed on upgrade if it still references the old versioned extension path or includes the dead `CLAUDE_MOD_ENABLE_NATIVE` / `CLAUDE_MOD_DISABLE_NATIVE` env vars
+
+### How the queue drains now
+
+1. Add prompts to the queue (Enter or paste-image-and-Enter).
+2. Type **anything** in Claude Code's chat — even just `"go"`.
+3. Claude processes that, finishes → Stop event fires.
+4. Our Stop hook reads the queue head, returns `decision: "block" + reason`.
+5. Claude continues with that prompt. Finishes. Stop fires again. Hook drains next. Repeat until queue is empty.
+
+This is the v0.2.0 design — the one user feedback ("okay great now it is that what i looking for") confirmed worked. Nothing fancier than that.
+
+### Migration on upgrade
+
+The extension does this once on activate:
+
+1. Refresh `~/.claude/claude-mod-hook.js` to the v0.3.0 feedback-only script.
+2. If the Stop-hook command in `settings.json` still has `CLAUDE_MOD_ENABLE_NATIVE` / `CLAUDE_MOD_DISABLE_NATIVE` env vars, re-install to strip them.
+3. If `~/.claude/settings.json` has a `UserPromptSubmit` hook with `claude-mod-user-submit-hook`, remove that entry.
+4. Delete `~/.claude/claude-mod-user-submit-hook.js`.
+5. Delete leftover `native-status.json` / `user-submit.json` in the current workspace's data dir.
+
+No user action required.
+
 ## [0.2.20] - 2026-05-24 — Reverse v0.2.19 over-conservatism; auto-kick + native back ON by default
 
 ### Honest correction
