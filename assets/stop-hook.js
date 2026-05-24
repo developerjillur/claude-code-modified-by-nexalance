@@ -100,6 +100,14 @@ function appendHistory(historyFile, text) {
 
 function tryNativeSubmit(text, nativeStatusFile) {
 	if (process.platform !== 'darwin') { return false; }
+	// v0.2.19 — Native osascript paste is OPT-IN, not default. The Stop hook
+	// + decision:block + reason path is reliable (Claude always processes
+	// the reason). osascript paste is fragile (Enter via System Events is
+	// often not honored by Claude Code's webview, so the paste sits in the
+	// input without being submitted). Users who want the pretty native
+	// look explicitly opt in via CLAUDE_MOD_ENABLE_NATIVE=1.
+	if (process.env.CLAUDE_MOD_ENABLE_NATIVE !== '1') { return false; }
+	// Legacy disable flag still honored for back-compat.
 	if (process.env.CLAUDE_MOD_DISABLE_NATIVE === '1') { return false; }
 
 	const tmp = path.join(os.tmpdir(), 'claude-mod-hook-' + Date.now() + '-' + Math.floor(Math.random() * 1e6) + '.txt');

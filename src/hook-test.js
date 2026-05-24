@@ -490,7 +490,11 @@ try {
 		// And the setting is registered as enabled by default
 		const pkg = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'package.json'), 'utf8'));
 		const setting = pkg.contributes.configuration.properties['claudeCodeModified.autoKickWhenIdle'];
-		assert(setting && setting.default === true, 'autoKickWhenIdle default = true (auto-kick on by default)');
+		// v0.2.19 flipped this default to false — Stop hook + block+reason
+		// is the reliable primary flow; auto-kick is opt-in.
+		assert(setting && setting.default === false, 'autoKickWhenIdle default = false (opt-in only as of v0.2.19)');
+		const nsSetting = pkg.contributes.configuration.properties['claudeCodeModified.enableNativeSubmit'];
+		assert(nsSetting && nsSetting.default === false, 'enableNativeSubmit default = false (Stop hook feedback is primary)');
 	})();
 
 	console.log('\n=== Attachment helpers ===');

@@ -2,7 +2,7 @@
   "name": "claude-code-modified-by-nexalance",
   "displayName": "Claude Code Modified by NexaLance",
   "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "publisher": "DeveloperJillur",
   "author": "Developer Jillur",
   "repository": {
@@ -93,8 +93,13 @@
         },
         "claudeCodeModified.autoKickWhenIdle": {
           "type": "boolean",
-          "default": true,
-          "description": "When you add a prompt to an empty queue (or open VS Code with pending items already there) AND no Stop-hook fire has happened in the last 30 seconds (Claude appears idle), push the head item into Claude's chat automatically via osascript. Subsequent items drain via the Stop hook in the normal way. Cooldown of 60s prevents the v0.2.4 'kick storm' issue. Turn off if you prefer to drive the queue exclusively via Fire-now clicks + Stop hook."
+          "default": false,
+          "description": "Experimental. When enabled, the extension auto-kicks pending prompts into Claude's chat via osascript when Claude appears idle. Off by default because the osascript paste path can miss the chat input or fail to submit, leading to silent drops. The reliable default flow is: the Stop hook drains the queue via decision:block+reason whenever Claude finishes a turn. Enable only if you've confirmed native submit works in your setup."
+        },
+        "claudeCodeModified.enableNativeSubmit": {
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental. When enabled, the Stop hook tries to paste each queued prompt into Claude's chat via osascript so it appears as a real user message. When disabled (default), the hook uses decision:block+reason instead — the prompt appears under the 'Stop hook feedback:' label but reliably reaches Claude. Native submit looks nicer but can fail silently when Claude Code's webview doesn't honor a synthesized Enter key."
         }
       }
     }

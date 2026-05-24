@@ -27,6 +27,42 @@ function currentWorkspacePath(): string {
 	return ws || '__no-workspace__';
 }
 
+/**
+ * Rewrite the Stop hook command in ~/.claude/settings.json so it includes
+ * CLAUDE_MOD_ENABLE_NATIVE=1 (or removes it) based on the current setting.
+ * This is the cleanest way to pass the toggle through to the hook subprocess
+ * which Claude Code spawns and which has no other way to read VS Code config.
+ */
+function rewriteHookCommandForNativeSetting(extensionPath: string): void {
+	const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
+	const enableNative = cfg.get<boolean>('enableNativeSubmit', false);
+	const settingsFile = require('os').homedir() + '/.claude/settings.json';
+	if (!fs.existsSync(settingsFile)) { return; }
+	let settings: any;
+	try { settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8')); }
+	catch { return; }
+	if (!settings.hooks || !Array.isArray(settings.hooks.Stop)) { return; }
+	const stableHook = require('os').homedir() + '/.claude/claude-mod-hook.js';
+	const wantedCommand = enableNative
+		? `CLAUDE_MOD_ENABLE_NATIVE=1 /usr/bin/env node "${stableHook}" # claude-mod-stop-hook`
+		: `/usr/bin/env node "${stableHook}" # claude-mod-stop-hook`;
+	let changed = false;
+	for (const entry of settings.hooks.Stop) {
+		if (!entry?.hooks || !Array.isArray(entry.hooks)) { continue; }
+		for (const h of entry.hooks) {
+			if (typeof h.command === 'string' && h.command.includes('claude-mod-stop-hook')) {
+				if (h.command !== wantedCommand) {
+					h.command = wantedCommand;
+					changed = true;
+				}
+			}
+		}
+	}
+	if (changed) {
+		fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
+	}
+}
+
 function currentPaths(): WorkspacePaths {
 	const ws = currentWorkspacePath();
 	return ws === '__no-workspace__' ? getPathsForFallback() : getPathsForWorkspace(ws);
@@ -98,6 +134,22 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 		})
 	);
+
+	// Whenever the user toggles enableNativeSubmit, re-install the hook
+	// command so the new env var takes effect for future Claude Code Stop
+	// events. The hook reads CLAUDE_MOD_ENABLE_NATIVE at startup.
+	context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+		if (e.affectsConfiguration('claudeCodeModified.enableNativeSubmit')) {
+			try {
+				rewriteHookCommandForNativeSetting(context.extensionPath);
+			} catch (err: any) {
+				console.warn('[claude-mod] could not rewrite hook command:', err.message);
+			}
+		}
+	}));
+	// Make sure the hook command already reflects the current setting on
+	// activation (in case the setting changed while the extension was off).
+	try { rewriteHookCommandForNativeSetting(context.extensionPath); } catch (_) { /* noop */ }
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('claude-code-modified.uninstallHook', async () => {
@@ -196,8 +248,9 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		// reloaded VS Code), give them a kick now so the work continues.
 		// Same idle/cooldown safeguards as a runtime add.
 		setTimeout(() => {
+			// v0.2.19 — default off.
 			const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
-			if (cfg.get<boolean>('autoKickWhenIdle', true)
+			if (cfg.get<boolean>('autoKickWhenIdle', false)
 				&& loadQueueFromFile(this._paths.queueFile).length > 0) {
 				this._maybeAutoKick();
 			}
@@ -217,8 +270,13 @@ class QueueProvider implements vscode.WebviewViewProvider {
 					// Auto-kick reborn (safer than v0.2.4): only fire when the
 					// queue transitions from empty → non-empty AND the user's
 					// session looks idle (no recent hook fire, no recent kick).
+					// v0.2.19 — auto-kick is OFF by default. The Stop hook +
+					// decision:block + reason path is the reliable primary
+					// flow. osascript auto-kicks were causing silent paste
+					// misses and frustration. Opt back in via the setting if
+					// you want them.
 					const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
-					if (cfg.get<boolean>('autoKickWhenIdle', true)
+					if (cfg.get<boolean>('autoKickWhenIdle', false)
 						&& previousQueue.length === 0
 						&& msg.data.length > 0) {
 						this._maybeAutoKick();
@@ -500,8 +558,11 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	public startPeriodicAutoKick(): void {
 		if (this._periodicTimer) { return; }
 		this._periodicTimer = setInterval(() => {
+			// v0.2.19 — default off. Watchdog was firing osascript even when
+			// the hook chain would have drained reliably; turning it off
+			// avoids interfering with the Stop hook + block+reason path.
 			const cfg = vscode.workspace.getConfiguration('claudeCodeModified');
-			if (!cfg.get<boolean>('autoKickWhenIdle', true)) { return; }
+			if (!cfg.get<boolean>('autoKickWhenIdle', false)) { return; }
 			if (loadQueueFromFile(this._paths.queueFile).length === 0) { return; }
 			this._maybeAutoKick();
 		}, QueueProvider.PERIODIC_CHECK_INTERVAL_MS);
@@ -555,6 +616,18 @@ class QueueProvider implements vscode.WebviewViewProvider {
 			const rest = queue.slice(1);
 			saveQueueToFile(this._paths.queueFile, rest);
 			this._post({ type: 'restoreQueue', data: rest });
+
+			// Manual Fire-now or auto-kick path → tries native osascript
+			// only if explicitly enabled via setting. Otherwise we update
+			// the kick-in-flight UI but do nothing — the user's Stop hook
+			// chain will drain the queue naturally on the next Claude turn.
+			const cfgNative = vscode.workspace.getConfiguration('claudeCodeModified');
+			const nativeEnabled = cfgNative.get<boolean>('enableNativeSubmit', false);
+			if (!nativeEnabled && reason === 'auto') {
+				// Auto-kick fired but native is disabled → silently drop;
+				// the Stop hook will pick it up on Claude's next turn.
+				return;
+			}
 
 			// v0.2.18 — focus Anthropic's chat input via their VS Code
 			// command BEFORE osascript runs. Their Cmd+Esc keybinding has

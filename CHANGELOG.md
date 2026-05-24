@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.2.19] - 2026-05-24 — Permanent solution: Stop hook is primary, osascript is opt-in
+
+### The honest diagnosis
+
+Versions 0.2.4 through 0.2.18 chased a series of related failures in the osascript-based "type into Claude's chat" path. Each fix addressed a real bug (auto-kick storms, watchdog mid-turn fires, focus failing because of `editorTextFocus` when-clause, etc.), but a deeper issue remained: even with focus correctly obtained and paste landing in the chat input, **Claude Code's webview React handler often doesn't honor a synthesized Enter key**. The text sits in the input box without being submitted. This is a known fragility with OS-level keystroke injection into webview controls — there's no reliable fix from outside Claude Code's process.
+
+### The permanent solution
+
+Revert to the design that always worked: **the Stop hook drains the queue via `decision:block + reason`**. This delivers each queued prompt to Claude **inside Claude Code's own process** — no keystroke injection, no focus gymnastics, no synthesized Enter. The trade-off is the visible `"Stop hook feedback:"` label, which is purely cosmetic — Claude treats the content as instructions and acts on them.
+
+### Defaults flipped
+
+| Setting | v0.2.18 default | v0.2.19 default |
+|---|---|---|
+| `claudeCodeModified.autoKickWhenIdle` | true | **false** |
+| `claudeCodeModified.enableNativeSubmit` | (didn't exist) | **false** |
+
+- The Stop hook now uses the reliable `decision:block + reason` path by default. `CLAUDE_MOD_ENABLE_NATIVE=1` opts in to native osascript paste.
+- The extension stops triggering auto-kicks (saveQueue handler, sidebar-open setTimeout, periodic watchdog) unless `autoKickWhenIdle` is explicitly enabled.
+- The Fire-now button still works for manual kicks; it tries native only if `enableNativeSubmit` is on.
+- Switching `enableNativeSubmit` rewrites the Stop hook's command in `~/.claude/settings.json` automatically so the env var reaches the hook subprocess.
+
+### How the queue drains now
+
+1. You add prompts to the queue.
+2. You type **anything** in Claude Code's chat (real user message, even just `"go"`).
+3. Claude processes that → finishes → **Stop event fires**.
+4. Our Stop hook reads the queue, takes the head, returns `decision:block + reason`.
+5. Claude continues with that prompt. Finishes. Stop fires again. Hook drains next. Repeat until queue empty.
+
+The flow is fully automatic from the second prompt onward, just like the v0.2.0–v0.2.3 design that worked before we tried to get fancy with osascript.
+
+### Fire-now (manual override) still exists
+
+If Claude has been idle for a long time and won't take a turn on its own, clicking ▶ Fire now kicks the head item:
+
+- If `enableNativeSubmit` is on, tries osascript paste + verification.
+- If osascript misses (kick verification fails), restores the item and falls back to the Stop hook path on Claude's next turn.
+
+### Tests
+
+All 90+ unit tests + 39 live E2E tests still pass. Updated assertions check that:
+- `autoKickWhenIdle` default = false
+- `enableNativeSubmit` default = false
+- The hook honors `CLAUDE_MOD_ENABLE_NATIVE=1` opt-in (instead of `CLAUDE_MOD_DISABLE_NATIVE=1` opt-out)
+- The extension rewrites the hook command on setting change
+
 ## [0.2.18] - 2026-05-24 — Native chat focus + post-kick verification
 
 ### Diagnosed — osascript "succeeded" but Claude Code never received the prompt
