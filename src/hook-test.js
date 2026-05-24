@@ -193,6 +193,13 @@ try {
 	out = JSON.parse(r.stdout);
 	assert(!out.decision, 'empty workspace queue → no decision');
 
+	console.log('\n=== v0.2.17 — stale-submit recovery (LASTSUB > LASTSTOP but ancient → kick) ===');
+	(function () {
+		const extSrc = fs.readFileSync(path.join(EXT_ROOT, 'out/extension.js'), 'utf8');
+		assert(extSrc.indexOf('STALE_SUBMIT_THRESHOLD_MS') >= 0, 'extension defines STALE_SUBMIT_THRESHOLD_MS constant');
+		assert(extSrc.indexOf('submitAge >= QueueProvider.STALE_SUBMIT_THRESHOLD_MS') >= 0, 'watchdog checks stale-submit before bailing on busy state');
+	})();
+
 	console.log('\n=== v0.2.16 — in-memory _lastSuccessfulKickAt closes file-write race ===');
 	(function () {
 		// Static verify the compiled extension defines _lastSuccessfulKickAt

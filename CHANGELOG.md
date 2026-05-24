@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.2.17] - 2026-05-24 — Stale-submit recovery (queue no longer stuck when Claude Code stops firing Stop)
+
+### Diagnosed from a live Kvanti-3 inspection
+
+```
+Queue                : 1 item pending
+LASTSUB              : 28.9 minutes ago   (user submitted long ago)
+LASTSTOP (source:hook): NEVER             (zero Stop fires recorded anywhere)
+```
+
+Claude Code never fired the Stop hook in this session — most likely because the weekly usage limit (87%) was hit and Claude couldn't complete the turn. The v0.2.16 watchdog gate read `LASTSUB > LASTSTOP=0` as "Claude is busy" and bailed every check. Since LASTSTOP never moves from 0 in this scenario, the bail was permanent and the queue sat stuck forever.
+
+### Fix
+
+The watchdog gate now treats a stale LASTSUB (older than 2 minutes with no corresponding Stop) as evidence that Claude is **not actually busy**, and kicks the queue.
+
+```ts
+const submitAge = now - lastSubAt;
+if (submitAge >= STALE_SUBMIT_THRESHOLD_MS) {  // 2 minutes
+    this._maybeKickHead('auto');               // kick anyway
+    return;
+}
+```
+
+Common scenarios this handles:
+
+- Claude hit a rate / weekly limit and never completed the turn
+- The Claude Code session ended (user closed the chat, restarted, etc.)
+- Claude Code stopped firing Stop hooks for any reason
+- A prior crash / interrupted turn left the marker file stale
+
+Real Claude turns rarely take more than 2 minutes, so kicking after that threshold is safe even in the rare false-positive case.
+
+### Tests
+
+```
+=== v0.2.17 — stale-submit recovery (LASTSUB > LASTSTOP but ancient → kick) ===
+  ✓ extension defines STALE_SUBMIT_THRESHOLD_MS constant
+  ✓ watchdog checks stale-submit before bailing on busy state
+```
+
+Plus all 90+ existing unit tests + 39 live E2E tests still green.
+
 ## [0.2.16] - 2026-05-24 — Closes the file-write race that let 5 kicks fire in 4 seconds
 
 ### Diagnosed — v0.2.15's busy check could be fooled by file-write timing

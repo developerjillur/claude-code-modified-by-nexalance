@@ -173,6 +173,13 @@ class QueueProvider implements vscode.WebviewViewProvider {
 	// Claude is stuck or the hook is broken; re-kick as a recovery. Long
 	// enough that real long-running Claude turns won't trigger it.
 	private static KICK_MAX_WAIT_MS = 5 * 60_000;
+	// v0.2.17 — If LASTSUB > LASTSTOP but LASTSUB is older than this
+	// threshold, treat Claude as idle rather than busy. Covers the case
+	// where Claude Code stops firing Stop hooks (rate limit, session
+	// ended, or other state), which would otherwise leave the gate stuck
+	// on "busy" forever. Most Claude turns finish in well under 2 minutes,
+	// so kicking after 2 min of unresolved submission is reasonable.
+	private static STALE_SUBMIT_THRESHOLD_MS = 2 * 60_000;
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -413,10 +420,26 @@ class QueueProvider implements vscode.WebviewViewProvider {
 		const lastKickAt = this._lastAutoKickAt;
 
 		// CASE 1: Claude is currently busy (a prompt was submitted, no Stop
-		// yet) — never kick mid-turn.
+		// yet) — usually means we should not kick mid-turn.
 		if (lastSubAt > lastStopAt) {
-			// Recovery: if we kicked long ago and nothing has progressed,
-			// try again.
+			const submitAge = now - lastSubAt;
+
+			// 1a. STALE SUBMIT recovery (v0.2.17). If the user-submit
+			//     marker is older than STALE_SUBMIT_THRESHOLD_MS and there's
+			//     still no Stop event, Claude is almost certainly not
+			//     actually processing anymore — likely scenarios:
+			//       - Claude hit a rate limit and never completed
+			//       - The Claude Code session ended (user closed chat)
+			//       - Claude Code stopped firing Stop hooks for this session
+			//     Kick the queue rather than wait forever.
+			if (submitAge >= QueueProvider.STALE_SUBMIT_THRESHOLD_MS) {
+				this._lastAutoKickAt = now;
+				this._maybeKickHead('auto');
+				return;
+			}
+
+			// 1b. Normal recovery: we kicked but nothing has progressed for
+			//     KICK_MAX_WAIT_MS. Re-kick.
 			if (lastKickAt > 0 && now - lastKickAt >= QueueProvider.KICK_MAX_WAIT_MS) {
 				this._lastAutoKickAt = now;
 				this._maybeKickHead('auto');
