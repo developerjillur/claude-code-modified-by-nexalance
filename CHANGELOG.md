@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.3.1] - 2026-05-24 — Monorepo / subfolder fix: hook walks UP to find the active queue
+
+### The bug that wasted 23 days
+
+Versions 0.2.8 through 0.3.0 silently failed in any project where:
+- VS Code's workspace folder was the **repo root** (e.g. `Kvanti-3/`)
+- Claude Code's session was actually running in a **subfolder** of that workspace (e.g. `Kvanti-3/kvanti-nextjs-frontend/`)
+
+This is the common monorepo layout. In that case:
+
+| Component | Where it operates | Queue dir computed |
+|---|---|---|
+| Sidebar (uses `vscode.workspace.workspaceFolders[0]`) | `Kvanti-3/` | `~/.claude/claude-mod-queues/Kvanti-3-3f2a19c9/` |
+| Hook (uses Claude Code's Stop event `cwd`) | `Kvanti-3/kvanti-nextjs-frontend/` | `~/.claude/claude-mod-queues/kvanti-nextjs-frontend-19255c3a/` |
+
+Sidebar wrote queue items to one folder. Hook read from a completely different folder. They never met. **Every "Stop hook isn't firing" report from a monorepo user was actually this** — the hook fired correctly, just looked at the wrong queue and returned `{}`.
+
+Detection: added a per-invocation diagnostic logger; saw the hook firing from the subfolder cwd while items piled up in the parent's queue dir. Verified by comparing against a different Stop hook (mempalace's) that was firing normally from the same subfolder.
+
+### The fix (`assets/stop-hook.js`)
+
+The hook now walks UP the directory tree from the Stop event's `cwd`, checking each parent for an existing populated queue. First parent with `queue.json` containing at least one item wins. All reads + writes (queue, history, chain counter) go to that found dir, so the sidebar (watching the parent dir) sees drains in real time.
+
+```js
+function findActiveWorkspaceFor(cwd) {
+  let current = canonicalize(cwd);
+  for (let i = 0; i < 12; i++) {                  // bounded walk
+    const candidate = pathsForWorkspace(current);
+    if (queueAtPathHasItems(candidate.queueFile)) {
+      return candidate;                            // first populated parent wins
+    }
+    const parent = path.dirname(current);
+    if (!parent || parent === current) { break; }
+    current = parent;
+  }
+  return pathsForWorkspace(cwd);                   // fallback: exact cwd
+}
+```
+
+### Cases handled
+
+| Setup | v0.3.0 | v0.3.1 |
+|---|---|---|
+| VS Code at repo root, Claude Code in `frontend/` (monorepo) | Reads empty `frontend/` dir, never drains | Walks UP to repo root, drains real queue ✓ |
+| VS Code + Claude Code at same folder | Reads same dir as sidebar | Same — finds queue in own dir, no walk ✓ |
+| VS Code at parent, Claude Code in a subfolder that ALSO has its own queue | Reads subfolder queue | Same — first populated queue wins (subfolder is found first) ✓ |
+| No queue anywhere | Returns `{}` | Same — walks up, finds nothing, returns `{}` ✓ |
+
+### Why this took 23 days to find
+
+Earlier versions (v0.2.4 → v0.2.20) blamed osascript and added 16 versions of unreliable native-submit code trying to "make Claude take a turn so the hook fires." **The hook was running on every Claude turn from day one of v0.2.8** — it just read the wrong directory and returned empty, indistinguishable from "didn't fire" to the user.
+
+### Migration
+
+No user action needed. Extension refreshes `~/.claude/claude-mod-hook.js` to the new version on activation. Hook scripts are re-executed fresh on every Stop event, so no Claude Code reload is needed.
+
 ## [0.3.0] - 2026-05-24 — Drop osascript native submit entirely; Stop-hook is the only path
 
 ### The honest summary

@@ -70,6 +70,43 @@ function pathsForWorkspace(workspacePath) {
 	};
 }
 
+/**
+ * v0.3.1 — Monorepo / subfolder support.
+ *
+ * The Claude Code Stop event's `cwd` is often a SUBFOLDER (e.g. a
+ * `frontend/` package inside a monorepo) — not the VS Code workspace
+ * root the sidebar uses. So this hook walks UP the directory tree from
+ * `cwd`, checking each parent's workspace dir for an existing queue.json
+ * with at least one item. The first match wins.
+ *
+ * Falls back to the exact cwd's workspace dir (even if queue is empty or
+ * missing) if no parent has a populated queue — so first-write behavior
+ * is unchanged when the user IS at the workspace root.
+ */
+function findActiveWorkspaceFor(cwd) {
+	const canonStart = canonicalizeWorkspacePath(cwd);
+	if (canonStart === '__no-workspace__') { return pathsForWorkspace(canonStart); }
+	let current = canonStart;
+	const MAX_WALK = 12; // generous; avoids walking to '/' on absurd nesting
+	for (let i = 0; i < MAX_WALK; i++) {
+		const candidate = pathsForWorkspace(current);
+		if (fs.existsSync(candidate.queueFile)) {
+			try {
+				const parsed = JSON.parse(fs.readFileSync(candidate.queueFile, 'utf8'));
+				if (Array.isArray(parsed) && parsed.length > 0) {
+					return candidate;
+				}
+			} catch (_) { /* corrupt — keep walking */ }
+		}
+		const parent = path.dirname(current);
+		if (!parent || parent === current || parent === '/') { break; }
+		current = parent;
+	}
+	// No ancestor with a populated queue. Use the exact cwd's dir so that
+	// future drains / history writes still go to the canonical place.
+	return pathsForWorkspace(canonStart);
+}
+
 function atomicWrite(target, contents) {
 	const dir = path.dirname(target);
 	if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
@@ -104,7 +141,11 @@ process.stdin.on('end', () => {
 	const workspacePath = (event && typeof event.cwd === 'string' && event.cwd)
 		|| process.cwd()
 		|| '__no-workspace__';
-	const p = pathsForWorkspace(workspacePath);
+	// v0.3.1 — walk parent directories from cwd to find the active queue.
+	// Handles the monorepo case where Claude Code's cwd is a subfolder
+	// (e.g. `<repo>/frontend`) but the sidebar saved the queue under the
+	// workspace root (`<repo>`).
+	const p = findActiveWorkspaceFor(workspacePath);
 
 	let queue = [];
 	if (fs.existsSync(p.queueFile)) {

@@ -239,7 +239,122 @@ try {
 		assert(cmds.indexOf('claude-code-modified.fireNow') === -1, 'fireNow command removed');
 		assert(cmds.indexOf('claude-code-modified.probeAccessibility') === -1, 'probeAccessibility command removed');
 		assert(cmds.indexOf('claude-code-modified.openAccessibilityPrefs') === -1, 'openAccessibilityPrefs command removed');
-		assert(pkg.version === '0.3.0', 'version bumped to 0.3.0');
+		assert(pkg.version === '0.3.1', 'version bumped to 0.3.1');
+	})();
+
+	console.log('\n=== v0.3.1 — Walk-UP: subfolder cwd finds parent root queue ===');
+	(function () {
+		// Build a parent dir with a populated queue, then fire the hook with
+		// cwd = subfolder. Hook should walk UP, find parent's queue, drain
+		// to parent's dir (not create a new subfolder dir).
+		const parentRaw = path.join(os.tmpdir(), 'claude-mod-monorepo-' + Date.now());
+		fs.mkdirSync(parentRaw, { recursive: true });
+		const parent = fs.realpathSync(parentRaw);
+		const subRaw = path.join(parent, 'frontend');
+		fs.mkdirSync(subRaw, { recursive: true });
+		const sub = fs.realpathSync(subRaw);
+
+		const parentDir = wsDir(parent);
+		const subDir = wsDir(sub);
+
+		// Write queue in parent only
+		writeQueue(parent, [
+			{ id: 'mr1', text: 'monorepo prompt 1', createdAt: 1 },
+			{ id: 'mr2', text: 'monorepo prompt 2', createdAt: 2 }
+		]);
+
+		// Fire hook with cwd = subfolder
+		let r = runHook(JSON.stringify({ cwd: sub }));
+		let out = JSON.parse(r.stdout);
+		assert(out.decision === 'block', 'walk-up: hook returned decision:block from subfolder cwd');
+		assert(out.reason === 'monorepo prompt 1', 'walk-up: drained from parent queue (got: ' + (out.reason || '').slice(0,40) + ')');
+
+		// Parent queue should now have 1 item (drained from there, not from subfolder)
+		const remaining = readQueue(parent);
+		assert(remaining && remaining.length === 1, 'walk-up: parent queue decremented to 1 (got: ' + (remaining || []).length + ')');
+		assert(remaining && remaining[0].text === 'monorepo prompt 2', 'walk-up: correct remaining item');
+
+		// Subfolder queue dir should NOT have been created
+		const subQueueExists = fs.existsSync(path.join(subDir, 'queue.json'));
+		assert(!subQueueExists, 'walk-up: subfolder queue dir NOT created (drains to parent)');
+
+		// History should be in parent
+		const parentHist = readHistory(parent);
+		assert(parentHist && parentHist.length === 1, 'walk-up: history written to parent dir');
+		assert(parentHist && parentHist[0].source === 'hook', 'walk-up: history tagged source:hook');
+
+		// Cleanup
+		try {
+			for (const f of fs.readdirSync(parentDir)) { fs.unlinkSync(path.join(parentDir, f)); }
+			fs.rmdirSync(parentDir);
+		} catch (_) {}
+		try { fs.rmdirSync(sub); fs.rmdirSync(parent); } catch (_) {}
+	})();
+
+	console.log('\n=== v0.3.1 — Walk-UP: same-folder cwd finds own queue (no walk) ===');
+	(function () {
+		const wsRaw = path.join(os.tmpdir(), 'claude-mod-same-' + Date.now());
+		fs.mkdirSync(wsRaw, { recursive: true });
+		const ws = fs.realpathSync(wsRaw);
+		writeQueue(ws, [{ id: 'sf1', text: 'same-folder prompt', createdAt: 1 }]);
+		const r = runHook(JSON.stringify({ cwd: ws }));
+		const out = JSON.parse(r.stdout);
+		assert(out.decision === 'block' && out.reason === 'same-folder prompt', 'same-folder: hook reads its own queue (no walk needed)');
+		try {
+			const d = wsDir(ws);
+			for (const f of fs.readdirSync(d)) { fs.unlinkSync(path.join(d, f)); }
+			fs.rmdirSync(d);
+			fs.rmdirSync(ws);
+		} catch (_) {}
+	})();
+
+	console.log('\n=== v0.3.1 — Walk-UP: no parent has queue → returns {} ===');
+	(function () {
+		const wsRaw = path.join(os.tmpdir(), 'claude-mod-empty-' + Date.now(), 'deep', 'nested');
+		fs.mkdirSync(wsRaw, { recursive: true });
+		const ws = fs.realpathSync(wsRaw);
+		const r = runHook(JSON.stringify({ cwd: ws }));
+		const out = JSON.parse(r.stdout);
+		assert(!out.decision, 'no-queue-anywhere: returns {} (no decision)');
+		try {
+			fs.rmdirSync(ws);
+			fs.rmdirSync(path.dirname(ws));
+			fs.rmdirSync(path.dirname(path.dirname(ws)));
+		} catch (_) {}
+	})();
+
+	console.log('\n=== v0.3.1 — Walk-UP: subfolder queue (if populated) takes priority over parent ===');
+	(function () {
+		const parentRaw = path.join(os.tmpdir(), 'claude-mod-prio-' + Date.now());
+		fs.mkdirSync(parentRaw, { recursive: true });
+		const parent = fs.realpathSync(parentRaw);
+		const subRaw = path.join(parent, 'sub');
+		fs.mkdirSync(subRaw, { recursive: true });
+		const sub = fs.realpathSync(subRaw);
+
+		// BOTH have queues
+		writeQueue(parent, [{ id: 'p1', text: 'parent item', createdAt: 1 }]);
+		writeQueue(sub, [{ id: 's1', text: 'subfolder item', createdAt: 2 }]);
+
+		const r = runHook(JSON.stringify({ cwd: sub }));
+		const out = JSON.parse(r.stdout);
+		assert(out.reason === 'subfolder item', 'priority: subfolder queue wins when it has items (got: ' + (out.reason || '').slice(0,40) + ')');
+
+		// Parent untouched
+		const parentRemaining = readQueue(parent);
+		assert(parentRemaining && parentRemaining.length === 1, 'priority: parent queue is UNTOUCHED');
+		assert(parentRemaining && parentRemaining[0].text === 'parent item', 'priority: parent item still there');
+
+		// Cleanup
+		try {
+			for (const d of [wsDir(parent), wsDir(sub)]) {
+				if (fs.existsSync(d)) {
+					for (const f of fs.readdirSync(d)) { fs.unlinkSync(path.join(d, f)); }
+					fs.rmdirSync(d);
+				}
+			}
+			fs.rmdirSync(sub); fs.rmdirSync(parent);
+		} catch (_) {}
 	})();
 
 	console.log('\n=== Stop-hook chain drain (multi-item via stop_hook_active) ===');
