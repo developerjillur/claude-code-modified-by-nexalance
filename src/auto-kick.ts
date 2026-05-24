@@ -68,19 +68,23 @@ export async function kickClaudeCodeChat(text: string, options?: KickOptions): P
 		? '-- focus already obtained via vscode.commands.executeCommand("claude-vscode.focus")'
 		: 'keystroke (ASCII character 27) using {command down}\n\t\t\t\tdelay 0.25';
 
+	// v0.2.20 reliability tweaks (same as the hook): longer activation
+	// delay, longer paste→submit gap so React's paste handler commits the
+	// value to state before Enter fires, and a backup Enter in case the
+	// first one was absorbed by the paste handler.
 	const script = `
 		try
 			set kickFile to POSIX file "${escapedPath}"
 			set kickContents to (read kickFile as «class utf8»)
 			set the clipboard to kickContents
 			tell application "Visual Studio Code" to activate
-			delay 0.3
+			delay 0.4
 			tell application "System Events"
 				${focusStanza}
-				-- Paste
 				keystroke "v" using {command down}
-				delay 0.25
-				-- Submit
+				delay 0.5
+				key code 36
+				delay 0.15
 				key code 36
 			end tell
 			return "ok"

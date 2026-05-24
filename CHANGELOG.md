@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.2.20] - 2026-05-24 — Reverse v0.2.19 over-conservatism; auto-kick + native back ON by default
+
+### Honest correction
+
+v0.2.19 disabled both `autoKickWhenIdle` and `enableNativeSubmit` to avoid the osascript silent-miss failure mode. That was the wrong trade-off — it removed the feature the user actually wanted (queue drains automatically when Claude is idle). Without auto-kick, the queue only progresses after the user manually types something in Claude's chat, which defeats the entire purpose of having a queue.
+
+### v0.2.20 changes
+
+- **`autoKickWhenIdle` default flipped back to `true`** — auto-kick on queue-add when Claude is idle, watchdog tick every 30s, and resolveWebviewView setTimeout all re-enabled.
+- **`enableNativeSubmit` default flipped back to `true`** — Stop hook tries osascript first, falls back to `decision:block + reason` on failure (as before).
+- **Hook env-var semantics changed:** native is now the default; `CLAUDE_MOD_DISABLE_NATIVE=1` explicitly disables it. (Previously v0.2.19 required `CLAUDE_MOD_ENABLE_NATIVE=1` to opt in.)
+- **Submit reliability improved:**
+  - Longer VS Code activate delay (0.3s → 0.4s).
+  - Longer paste-to-Enter gap (0.18-0.25s → 0.5s) so Claude's React paste handler commits the value to state before Enter fires.
+  - **Double Enter** as belt-and-suspenders: the first Enter is sometimes consumed by the React paste handler instead of submitting; the second one then submits cleanly. If the first Enter already submitted, the second is a harmless no-op against an empty input.
+
+### What stays the same
+
+- v0.2.18's **post-kick verification + restore-on-miss + warning notification** is the safety net. If osascript paste succeeds but Claude Code's UserPromptSubmit hook doesn't fire within 5 seconds, the item is restored to the queue head and a VS Code warning pops with a "Focus Claude" action button. **No silent queue drainage.**
+- v0.2.17's stale-submit recovery still in place (kicks anyway if LASTSUB > 2 min and no Stop).
+- v0.2.16's in-memory `_lastSuccessfulKickAt` still closes the file-write race.
+- v0.2.14's source-tagged history still keeps watchdog from firing mid-turn.
+- v0.2.12's chain-drain still drains multi-item chains.
+
+### Tests
+
+```
+=== unit suite ===
+  119 assertions / 19 groups ✓
+
+=== live E2E suite ===
+  39 assertions ✓
+```
+
+Both green with the new defaults.
+
 ## [0.2.19] - 2026-05-24 — Permanent solution: Stop hook is primary, osascript is opt-in
 
 ### The honest diagnosis

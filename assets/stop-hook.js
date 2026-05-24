@@ -100,33 +100,48 @@ function appendHistory(historyFile, text) {
 
 function tryNativeSubmit(text, nativeStatusFile) {
 	if (process.platform !== 'darwin') { return false; }
-	// v0.2.19 — Native osascript paste is OPT-IN, not default. The Stop hook
-	// + decision:block + reason path is reliable (Claude always processes
-	// the reason). osascript paste is fragile (Enter via System Events is
-	// often not honored by Claude Code's webview, so the paste sits in the
-	// input without being submitted). Users who want the pretty native
-	// look explicitly opt in via CLAUDE_MOD_ENABLE_NATIVE=1.
-	if (process.env.CLAUDE_MOD_ENABLE_NATIVE !== '1') { return false; }
-	// Legacy disable flag still honored for back-compat.
+	// v0.2.20 — Native osascript is the default again (controlled by the
+	// extension's claudeCodeModified.enableNativeSubmit setting, which
+	// writes CLAUDE_MOD_ENABLE_NATIVE=1 into the hook command). The
+	// extension's v0.2.18 post-kick verification + restore-on-miss
+	// safety net catches the cases where paste lands but Enter doesn't
+	// trigger Claude's submit handler.
+	// If the explicit disable env var is set, honor it (lets users force
+	// feedback mode for specific scenarios).
 	if (process.env.CLAUDE_MOD_DISABLE_NATIVE === '1') { return false; }
+	// Opt-out semantics: if neither env var is set, default to native.
+	// (Earlier versions required opt-in; v0.2.20 changes default back.)
+	if (process.env.CLAUDE_MOD_ENABLE_NATIVE === '0') { return false; }
 
 	const tmp = path.join(os.tmpdir(), 'claude-mod-hook-' + Date.now() + '-' + Math.floor(Math.random() * 1e6) + '.txt');
 	try { fs.writeFileSync(tmp, text); }
 	catch (_) { return false; }
 
 	const escapedPath = tmp.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	// v0.2.20 reliability tweaks:
+	//   - longer activation delay (0.4s) — VS Code's window focus on macOS
+	//     can lag noticeably under load.
+	//   - longer paste-to-submit gap (0.5s) — Claude's webview React paste
+	//     handler needs time to settle the new value into state BEFORE
+	//     it'll honor a synthesized Enter as a submit.
+	//   - double Enter — first one is sometimes consumed by the React
+	//     paste handler instead of submit; the second one then submits
+	//     a (now-empty) input which is a no-op. If the first Enter
+	//     submitted, the second one's no-op is harmless.
 	const script = `
 		try
 			set kickFile to POSIX file "${escapedPath}"
 			set kickContents to (read kickFile as «class utf8»)
 			set the clipboard to kickContents
 			tell application "Visual Studio Code" to activate
-			delay 0.25
+			delay 0.4
 			tell application "System Events"
 				keystroke (ASCII character 27) using {command down}
-				delay 0.18
+				delay 0.25
 				keystroke "v" using {command down}
-				delay 0.18
+				delay 0.5
+				key code 36
+				delay 0.15
 				key code 36
 			end tell
 			return "ok"

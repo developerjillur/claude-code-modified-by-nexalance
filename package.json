@@ -2,7 +2,7 @@
   "name": "claude-code-modified-by-nexalance",
   "displayName": "Claude Code Modified by NexaLance",
   "description": "Codex-style prompt queue MANAGER for Anthropic's official Claude Code extension. Pure queue UI — no own chat. Pending prompts are auto-fed into your active Claude Code session via a Stop hook, so they only fire when the current turn is fully done.",
-  "version": "0.2.19",
+  "version": "0.2.20",
   "publisher": "DeveloperJillur",
   "author": "Developer Jillur",
   "repository": {
@@ -93,13 +93,13 @@
         },
         "claudeCodeModified.autoKickWhenIdle": {
           "type": "boolean",
-          "default": false,
-          "description": "Experimental. When enabled, the extension auto-kicks pending prompts into Claude's chat via osascript when Claude appears idle. Off by default because the osascript paste path can miss the chat input or fail to submit, leading to silent drops. The reliable default flow is: the Stop hook drains the queue via decision:block+reason whenever Claude finishes a turn. Enable only if you've confirmed native submit works in your setup."
+          "default": true,
+          "description": "When the queue has items and Claude appears idle, automatically push the head item into Claude's chat via osascript. Has the v0.2.18 verification safety net: if osascript paste succeeds but Claude Code's UserPromptSubmit hook doesn't fire within 5 seconds, the item is restored to the queue and a warning is shown. Turn off if you only want the Stop hook (decision:block+reason) drain path."
         },
         "claudeCodeModified.enableNativeSubmit": {
           "type": "boolean",
-          "default": false,
-          "description": "Experimental. When enabled, the Stop hook tries to paste each queued prompt into Claude's chat via osascript so it appears as a real user message. When disabled (default), the hook uses decision:block+reason instead — the prompt appears under the 'Stop hook feedback:' label but reliably reaches Claude. Native submit looks nicer but can fail silently when Claude Code's webview doesn't honor a synthesized Enter key."
+          "default": true,
+          "description": "When enabled, the Stop hook tries to paste each queued prompt into Claude's chat via osascript so it appears as a real user message. If osascript fails (no Accessibility permission, focus issues, etc.), automatically falls back to decision:block+reason which delivers reliably under the 'Stop hook feedback:' label. Off by default in v0.2.19 was the wrong call — re-enabled in v0.2.20."
         }
       }
     }
